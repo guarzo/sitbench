@@ -229,7 +229,7 @@ function describeOutcome(id: string, outcome: RecalculateOutcome): string {
     case 'recalculated':
       return `Recalculated run ${id}.`;
     case 'recalculated-with-warning':
-      return `Run ${id} was recalculated, but its catalog could not be rebuilt: ${outcome.reason}`;
+      return `Run ${id} was recalculated, but follow-up generation failed: ${outcome.reason}`;
     case 'incompatible':
       return `Run ${id} was left untouched: archived events do not satisfy the current schema (${outcome.reason}).`;
     case 'not-found':

@@ -324,3 +324,84 @@ describe('capability-gated DOM rendering', () => {
     expect(container.querySelector('.compare-characters')).toBeNull();
   });
 });
+
+describe('public capability/field consistency via validateDataset', () => {
+  function publicBase() {
+    return {
+      id: 'r1',
+      comparisonOrder: 0,
+      site: { name: 'S', key: 's' },
+      fleetProfile: { id: 'p', name: 'P' },
+      window: { start: '2026-09-01T10:00:00.000Z', end: '2026-09-01T10:10:00.000Z', source: 'test', manuallyAdjusted: false },
+      calculation: { episodeThresholdSeconds: 180, activeCombatGapSeconds: 30 },
+      metrics: { elapsedSeconds: 600, activeCombatSeconds: 540, idleSeconds: 60, fleetDamageDealt: 0, averageFleetDps: 0, activeFleetDps: 0, damageTaken: 0, remoteRepairDelivered: 0, participantCount: 0 },
+      coverage: { logFiles: 0, participantsWithOutgoingDamage: 0, unparsedCombatLines: 0, ambiguousEventsExcluded: 0, repairPairing: 'none' },
+    };
+  }
+
+  const charFields = {
+    participants: ['Alpha'],
+    characterMetrics: [{
+      character: 'Alpha', damageDealt: 0, fleetDamageShare: 0, averageDps: 0, activeDps: 0,
+      damageTaken: 0, remoteRepairDelivered: 0, remoteRepairReceived: 0,
+      shotsHit: 0, shotsMissed: 0, missRate: 0, hitQualityCounts: {},
+      firstRelevantEvent: null, lastRelevantEvent: null,
+    }],
+  };
+
+  it('rejects characters=true when participants/characterMetrics are missing', () => {
+    expect(() => validateDataset({
+      schemaVersion: 1, mode: 'public',
+      generatedAt: '2026-09-01T10:00:00.000Z',
+      capabilities: { characters: true, notes: false },
+      runs: [publicBase()],
+    })).toThrow(DatasetSchemaError);
+  });
+
+  it('rejects characters=false when participants present', () => {
+    expect(() => validateDataset({
+      schemaVersion: 1, mode: 'public',
+      generatedAt: '2026-09-01T10:00:00.000Z',
+      capabilities: { characters: false, notes: false },
+      runs: [{ ...publicBase(), ...charFields }],
+    })).toThrow(DatasetSchemaError);
+  });
+
+  it('rejects notes=true when notes key is missing', () => {
+    expect(() => validateDataset({
+      schemaVersion: 1, mode: 'public',
+      generatedAt: '2026-09-01T10:00:00.000Z',
+      capabilities: { characters: false, notes: true },
+      runs: [publicBase()],
+    })).toThrow(DatasetSchemaError);
+  });
+
+  it('rejects notes=false when notes key is present', () => {
+    expect(() => validateDataset({
+      schemaVersion: 1, mode: 'public',
+      generatedAt: '2026-09-01T10:00:00.000Z',
+      capabilities: { characters: false, notes: false },
+      runs: [{ ...publicBase(), notes: null }],
+    })).toThrow(DatasetSchemaError);
+  });
+
+  it('accepts characters=true with valid participants and characterMetrics', () => {
+    const ds = validateDataset({
+      schemaVersion: 1, mode: 'public',
+      generatedAt: '2026-09-01T10:00:00.000Z',
+      capabilities: { characters: true, notes: false },
+      runs: [{ ...publicBase(), ...charFields }],
+    });
+    expect(ds.mode).toBe('public');
+  });
+
+  it('accepts notes=true with null notes value', () => {
+    const ds = validateDataset({
+      schemaVersion: 1, mode: 'public',
+      generatedAt: '2026-09-01T10:00:00.000Z',
+      capabilities: { characters: false, notes: true },
+      runs: [{ ...publicBase(), notes: null }],
+    });
+    expect(ds.mode).toBe('public');
+  });
+});

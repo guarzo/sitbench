@@ -30,7 +30,34 @@ const AMBER_FILL = 'oklch(0.75 0.15 85 / 0.15)';
 const GRID_COLOR = 'oklch(0.35 0.005 250)';
 const TEXT_COLOR = 'oklch(0.85 0.01 250)';
 
-let chartInstance: Chart | null = null;
+// ---------------------------------------------------------------------------
+// Injectable chart factory for testability
+// ---------------------------------------------------------------------------
+
+/** Minimal interface for chart instance lifecycle. */
+export interface ChartHandle {
+  destroy(): void;
+}
+
+/** Factory that creates a chart given a canvas and config. */
+export type ChartFactory = (canvas: HTMLCanvasElement, config: ChartConfiguration<'line'>) => ChartHandle;
+
+export interface TrendDependencies {
+  createChart?: ChartFactory;
+}
+
+function defaultCreateChart(canvas: HTMLCanvasElement, config: ChartConfiguration<'line'>): ChartHandle {
+  return new Chart(canvas, config);
+}
+
+let chartInstance: ChartHandle | null = null;
+
+/** Temporal sort for trend chart X-axis: (window.start, id). */
+function trendOrder(a: DashboardRun, b: DashboardRun): number {
+  const cmp = a.window.start.localeCompare(b.window.start);
+  if (cmp !== 0) return cmp;
+  return a.id.localeCompare(b.id);
+}
 
 export function renderTrends(
   container: HTMLElement,
@@ -38,7 +65,10 @@ export function renderTrends(
   metric: TrendMetric,
   onMetricChange: (metric: TrendMetric) => void,
   selectedIndex: number | null,
+  deps?: TrendDependencies,
 ): void {
+  const createChart = deps?.createChart ?? defaultCreateChart;
+
   container.innerHTML = '';
   container.setAttribute('role', 'region');
   container.setAttribute('aria-label', 'Performance trends');
@@ -79,18 +109,32 @@ export function renderTrends(
     return;
   }
 
+  // Sort explicitly by (window.start, id) so public datasets with
+  // arbitrary payload order still chart chronologically.
+  const sorted = runs.slice().sort(trendOrder);
+
+  // Remap selectedIndex from the input order to the sorted order
+  let sortedSelectedIndex: number | null = null;
+  if (selectedIndex !== null && selectedIndex >= 0 && selectedIndex < runs.length) {
+    const selectedId = runs[selectedIndex]?.id;
+    if (selectedId !== undefined) {
+      sortedSelectedIndex = sorted.findIndex((r) => r.id === selectedId);
+      if (sortedSelectedIndex < 0) sortedSelectedIndex = null;
+    }
+  }
+
   const canvas = document.createElement('canvas');
   canvas.setAttribute('role', 'img');
   canvas.setAttribute('aria-label', `Trend chart showing ${METRIC_LABELS[metric]} over time`);
   container.appendChild(canvas);
 
-  const labels = runs.map((run) => formatShortDate(run.window.start));
-  const data = runs.map((run) => run.metrics[metric]);
+  const labels = sorted.map((run) => formatShortDate(run.window.start));
+  const data = sorted.map((run) => run.metrics[metric]);
 
-  const pointBg = runs.map((_, i) =>
-    i === selectedIndex ? AMBER_LINE : 'oklch(0.55 0.005 250)',
+  const pointBg = sorted.map((_, i) =>
+    i === sortedSelectedIndex ? AMBER_LINE : 'oklch(0.55 0.005 250)',
   );
-  const pointRadius = runs.map((_, i) => (i === selectedIndex ? 6 : 3));
+  const pointRadius = sorted.map((_, i) => (i === sortedSelectedIndex ? 6 : 3));
 
   // Destroy previous chart if any
   if (chartInstance !== null) {
@@ -140,5 +184,5 @@ export function renderTrends(
     },
   };
 
-  chartInstance = new Chart(canvas, config);
+  chartInstance = createChart(canvas, config);
 }

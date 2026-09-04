@@ -187,4 +187,58 @@ describe('derivative warning accumulation', () => {
     const outcome = result.status === 'ok' ? result.outcomes[0] : undefined;
     expect(outcome?.status).toBe('recalculated-with-warning');
   });
+
+  it('recalculate --all continues after one run fails and includes warnings', async () => {
+    const archive = new Archive(archiveDir);
+    const event: NormalizedEvent = {
+      kind: 'damage-dealt', timestamp: '2026-09-01T10:00:00.000Z', observedBy: 'Alpha',
+      sourceFile: 'log.txt', sourceLine: 1, raw: 'raw', actor: 'Alpha', target: 'NPC',
+      amount: 100, hitQuality: null, targetClassification: 'npc',
+    };
+    await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), [event]);
+    await archive.saveRun(buildSummary('run-b', '2026-09-02T10:00:00.000Z'), [{ ...event, timestamp: '2026-09-02T10:00:00.000Z' }]);
+
+    const output: string[] = [];
+    const result = await runRecalculate(
+      { all: true, archive: archiveDir },
+      {
+        write: (line) => output.push(line),
+        rebuildCatalog: async () => { throw new Error('dashboard fail'); },
+      },
+    );
+
+    // Both runs should be processed, both with warnings
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.outcomes).toHaveLength(2);
+      expect(result.outcomes.every((o) => o.status === 'recalculated-with-warning')).toBe(true);
+    }
+  });
+
+  it('recalculate warning message mentions dashboard, not catalog, when only dashboard fails', async () => {
+    const archive = new Archive(archiveDir);
+    const event: NormalizedEvent = {
+      kind: 'damage-dealt', timestamp: '2026-09-01T10:00:00.000Z', observedBy: 'Alpha',
+      sourceFile: 'log.txt', sourceLine: 1, raw: 'raw', actor: 'Alpha', target: 'NPC',
+      amount: 100, hitQuality: null, targetClassification: 'npc',
+    };
+    await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), [event]);
+
+    const output: string[] = [];
+    const result = await runRecalculate(
+      { runId: 'run-a', archive: archiveDir },
+      {
+        write: (line) => output.push(line),
+        rebuildCatalog: async () => { throw new Error('dashboard fail'); },
+      },
+    );
+
+    expect(result.status).toBe('ok');
+    const outcome = result.status === 'ok' ? result.outcomes[0] : undefined;
+    expect(outcome?.status).toBe('recalculated-with-warning');
+    // The output message must mention dashboard, not falsely say catalog
+    const warningLine = output.find((l) => l.includes('dashboard'));
+    expect(warningLine).toBeDefined();
+    expect(warningLine).not.toContain('catalog could not be rebuilt');
+  });
 });
