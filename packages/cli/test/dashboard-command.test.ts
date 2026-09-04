@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { createServer, type Server } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import serveHandler from 'serve-handler';
 import { Archive, type RunSummary } from '@sitbench/core';
@@ -252,6 +253,38 @@ describe('startDashboardServer', () => {
       expect(await recovered.text()).toContain('sitbench dashboard');
     } finally {
       await server.close();
+    }
+  });
+
+  it('forwards a server error raised after a successful listen to onError exactly once', async () => {
+    const errors: unknown[] = [];
+    let created: Server | null = null;
+    const server = await startDashboardServer(fakeDistDir, 0, {
+      createServer: (requestListener) => {
+        created = createServer(requestListener);
+        return created;
+      },
+      onError: (error) => errors.push(error),
+    });
+    try {
+      // A server-level failure raised after startup (the startup promise has
+      // long since settled) must still reach the caller's error reporter
+      // instead of being swallowed by the settled startup listener.
+      (created as Server | null)?.emit('error', new Error('runtime server failure'));
+
+      expect(errors).toHaveLength(1);
+      expect((errors[0] as Error).message).toBe('runtime server failure');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('still rejects startup when the requested port is already in use', async () => {
+    const first = await startDashboardServer(fakeDistDir, 0);
+    try {
+      await expect(startDashboardServer(fakeDistDir, first.port)).rejects.toThrow(/EADDRINUSE/);
+    } finally {
+      await first.close();
     }
   });
 });

@@ -10,12 +10,12 @@
   "exports": {
     "./package.json": "./package.json",
     "./data": {
-      "import": "./dist-lib/data.js",
-      "types": "./dist-lib/data.d.ts"
+      "types": "./dist-lib/data.d.ts",
+      "import": "./dist-lib/data.js"
     },
     "./state": {
-      "import": "./dist-lib/state.js",
-      "types": "./dist-lib/state.d.ts"
+      "types": "./dist-lib/state.d.ts",
+      "import": "./dist-lib/state.js"
     }
   },
   "scripts": {

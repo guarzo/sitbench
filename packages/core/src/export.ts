@@ -82,6 +82,21 @@ const PublicRunWithBothSchema = PublicRunSummaryBaseSchema.extend({
   notes: z.string().nullable(),
 }).strict();
 
+/**
+ * Every shape a public run may legitimately take, one per capability
+ * combination. Each branch is strict, so a run matches at most one of them
+ * and unknown keys are always rejected. This only establishes that a run is
+ * *some* valid public shape; `PublicDashboardDatasetSchema`'s `superRefine`
+ * additionally requires the shape to be the exact one the dataset's
+ * `capabilities` flags declare.
+ */
+export const PublicRunSummarySchema = z.union([
+  PublicRunWithBothSchema,
+  PublicRunWithCharactersSchema,
+  PublicRunWithNotesSchema,
+  PublicRunSummaryBaseSchema,
+]);
+
 export interface PublicRunSummary {
   id: string;
   comparisonOrder: number;
@@ -97,16 +112,19 @@ export interface PublicRunSummary {
 }
 
 /**
- * Public dataset schema with capability-consistent run validation via superRefine.
- * characters=true requires participants+characterMetrics on every run; false forbids both.
- * notes=true requires notes key (nullable) on every run; false forbids it.
+ * Public dataset schema with capability-consistent run validation. Every run
+ * must first be one of the four valid public shapes
+ * (`PublicRunSummarySchema`), and `superRefine` then requires it to be the
+ * exact shape the declared capabilities call for: characters=true requires
+ * participants+characterMetrics on every run; false forbids both. notes=true
+ * requires notes key (nullable) on every run; false forbids it.
  */
 export const PublicDashboardDatasetSchema = z.object({
   schemaVersion: z.literal(1),
   mode: z.literal('public'),
   generatedAt: z.string().datetime({ offset: true }),
   capabilities: DashboardCapabilitiesSchema,
-  runs: z.array(z.unknown()),
+  runs: z.array(PublicRunSummarySchema),
 }).strict().superRefine((data, ctx) => {
   const { characters, notes } = data.capabilities;
   let runSchema: z.ZodType;

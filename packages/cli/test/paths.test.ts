@@ -15,7 +15,10 @@ describe('discoverGameLogDirs', () => {
     const directories = new Map<string, string[]>([
       ['/mnt/c/Users', ['Tom', 'Public']],
       ['/mnt/c/Users/Tom/Documents/EVE/logs', ['Gamelogs']],
-      ['/mnt/c/Users/Public/Documents', []],
+      // Public has a perfectly valid Gamelogs directory: it must be excluded
+      // because the account is not an EVE player, not merely because the
+      // path happens to be missing or empty.
+      ['/mnt/c/Users/Public/Documents/EVE/logs', ['Gamelogs']],
     ]);
 
     await expect(

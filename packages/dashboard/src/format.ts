@@ -2,10 +2,16 @@
 // Formatting utilities for dashboard display values
 // ---------------------------------------------------------------------------
 
-/** Formats seconds as "Xm Ys" for elapsed/duration display. */
+/**
+ * Formats seconds as "Xm Ys" for elapsed/duration display. The total is
+ * rounded to whole seconds *before* the minute/second split, so a value that
+ * rounds up to a full minute rolls over correctly (59.6 is "1m 0s", never
+ * "60s" or "0m 60s").
+ */
 export function formatElapsed(seconds: number): string {
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = Math.round(seconds % 60);
+  const totalSeconds = Math.round(seconds);
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds - minutes * 60;
   if (minutes === 0) return `${String(remainingSeconds)}s`;
   return `${String(minutes)}m ${String(remainingSeconds)}s`;
 }

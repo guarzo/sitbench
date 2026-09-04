@@ -2,6 +2,7 @@ import { DatasetSchemaError, loadDataset, type DashboardDataset, type DashboardR
 import { sameGroupChronologyRuns } from './compare.js';
 import { renderCompare } from './compare-view.js';
 import { renderDetail } from './detail.js';
+import { preserveFocusWithin } from './focus.js';
 import { renderHistory, type SortDir, type SortField } from './history.js';
 import { renderOverview } from './overview.js';
 import {
@@ -47,8 +48,20 @@ function filterField(modifier: string, label: HTMLLabelElement, control: HTMLEle
 // Render
 // ---------------------------------------------------------------------------
 
+/**
+ * Rebuilds the filter controls from scratch. Because every control is
+ * recreated, the rebuild is wrapped so a control the user is currently
+ * typing in / tabbing through keeps keyboard focus instead of losing it on
+ * every update.
+ */
 function renderFilters(dataset: DashboardDataset, current: DashboardState): void {
   const filtersEl = qs('#filters');
+  preserveFocusWithin(filtersEl, () => {
+    renderFilterControls(filtersEl, dataset, current);
+  });
+}
+
+function renderFilterControls(filtersEl: HTMLElement, dataset: DashboardDataset, current: DashboardState): void {
   filtersEl.innerHTML = '';
   filtersEl.setAttribute('role', 'search');
   filtersEl.setAttribute('aria-label', 'Run filters');

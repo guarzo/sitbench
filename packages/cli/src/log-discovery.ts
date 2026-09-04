@@ -37,7 +37,11 @@ export const LOG_IO_CONCURRENCY = 16;
 /**
  * Maps `items` through `operation` with at most `limit` operations in
  * flight at any moment, preserving input order in the returned results.
- * The first rejection propagates; no further items are started after it.
+ * The first rejection propagates to the caller; the remaining workers are
+ * not cancelled and may keep processing further items until they finish, so
+ * what is guaranteed here is bounded concurrency, never a hard stop on
+ * failure. Callers that must tolerate individual failures should handle
+ * them inside `operation`.
  */
 export async function mapWithConcurrency<Item, Result>(
   items: readonly Item[],
@@ -74,26 +78,41 @@ export async function mapWithConcurrency<Item, Result>(
  *
  * These bounds always apply, including when the log directory was chosen
  * explicitly with `--logs`. Ordering is deterministic: newest modification
- * time first, with identical times broken by file name. `skippedFiles`
- * reports how many candidate `.txt` files were left unread, so callers can
- * tell the user what was not inspected.
+ * time first, with identical times broken by file name. A candidate whose
+ * `stat` fails — it was deleted between the directory listing and the stat,
+ * or is otherwise unreadable — is skipped rather than failing the whole
+ * discovery, and is counted in `skippedFiles` like any other unread
+ * candidate. A *read* failure on a selected file is still fatal, since that
+ * file was already confirmed to exist and was chosen for analysis.
+ * `skippedFiles` reports how many candidate `.txt` files were left unread,
+ * so callers can tell the user what was not inspected.
+ *
+ * `stat` is a narrow injectable seam (defaulting to `node:fs/promises`'
+ * `stat`) so the raced-away/unreadable candidate path can be exercised
+ * deterministically; production callers never override it.
  */
 export async function readRecentLogFiles(
   directory: string,
-  options: { now?: Date } = {},
+  options: { now?: Date; stat?: (filePath: string) => Promise<{ mtimeMs: number }> } = {},
 ): Promise<LogDiscovery> {
+  const statFile = options.stat ?? stat;
   const entries = await readdir(directory, { withFileTypes: true });
   const candidateNames = entries
     .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.txt'))
     .map((entry) => entry.name);
 
   const stats = await mapWithConcurrency(candidateNames, LOG_IO_CONCURRENCY, async (name) => {
-    const fileStat = await stat(path.join(directory, name));
-    return { name, modifiedAt: fileStat.mtimeMs };
+    try {
+      const fileStat = await statFile(path.join(directory, name));
+      return { name, modifiedAt: fileStat.mtimeMs };
+    } catch {
+      return null;
+    }
   });
 
   const cutoff = (options.now ?? new Date()).getTime() - RECENT_LOG_WINDOW_MS;
   const recent = stats
+    .filter((entry): entry is { name: string; modifiedAt: number } => entry !== null)
     .filter((entry) => entry.modifiedAt >= cutoff)
     .sort((left, right) => right.modifiedAt - left.modifiedAt || left.name.localeCompare(right.name));
   const selected = recent.slice(0, MAX_RECENT_LOG_FILES);

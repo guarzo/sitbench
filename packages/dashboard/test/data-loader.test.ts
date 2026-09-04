@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadDataset } from '../src/data.js';
+import { DatasetSchemaError, loadDataset } from '../src/data.js';
 
 const originalFetch = globalThis.fetch;
 
@@ -30,5 +30,38 @@ describe('loadDataset', () => {
     expect(requested).toEqual(['data/runs.json']);
     expect(requested[0]?.startsWith('/')).toBe(false);
     expect(dataset.mode).toBe('public');
+  });
+
+  it('reports malformed dataset JSON as a DatasetSchemaError rather than a raw parse failure', async () => {
+    globalThis.fetch = (async () => {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new SyntaxError('Unexpected token < in JSON at position 0');
+        },
+      } as unknown as Response;
+    }) as typeof fetch;
+
+    await expect(loadDataset()).rejects.toThrow(DatasetSchemaError);
+    await expect(loadDataset()).rejects.toThrow(/Unexpected token/);
+  });
+
+  it('reports a missing dataset file as a DatasetSchemaError without ever reading the body', async () => {
+    let jsonCalls = 0;
+    globalThis.fetch = (async () => {
+      return {
+        ok: false,
+        status: 404,
+        json: async () => {
+          jsonCalls += 1;
+          return {};
+        },
+      } as unknown as Response;
+    }) as typeof fetch;
+
+    await expect(loadDataset()).rejects.toThrow(DatasetSchemaError);
+    await expect(loadDataset()).rejects.toThrow(/HTTP 404/);
+    expect(jsonCalls).toBe(0);
   });
 });

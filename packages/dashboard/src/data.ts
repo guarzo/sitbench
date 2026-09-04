@@ -53,7 +53,7 @@ export function validateDataset(raw: unknown): DashboardDataset {
       `Invalid dashboard dataset${path.length > 0 ? ` at ${path}` : ''}: ${message}`,
     );
   }
-  return result.data as DashboardDataset;
+  return result.data;
 }
 
 /**
@@ -61,13 +61,24 @@ export function validateDataset(raw: unknown): DashboardDataset {
  * `data/runs.json` path, relative to the current document URL. The path is
  * deliberately relative (no leading slash) so the same build works both at
  * a loopback root and under a project subpath such as
- * `https://user.github.io/<project>/`.
+ * `https://user.github.io/<project>/`. A non-OK response is reported before
+ * the body is ever read; a body that is not parseable JSON is reported as a
+ * `DatasetSchemaError` carrying the parse failure, so callers only ever have
+ * to handle one error type. A `DatasetSchemaError` raised by schema
+ * validation itself is never rewrapped, so its precise field path survives.
  */
 export async function loadDataset(basePath = 'data/runs.json'): Promise<DashboardDataset> {
   const response = await fetch(basePath);
   if (!response.ok) {
     throw new DatasetSchemaError(`Failed to load dataset: HTTP ${String(response.status)}`);
   }
-  const raw: unknown = await response.json();
+  let raw: unknown;
+  try {
+    raw = await response.json();
+  } catch (error) {
+    throw new DatasetSchemaError(
+      `Failed to parse dashboard dataset as JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   return validateDataset(raw);
 }

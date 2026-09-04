@@ -39,10 +39,13 @@ export class InvalidRunIdError extends Error {}
 export class ArchiveCorruptionError extends Error {}
 
 /**
- * Thrown when the authoritative run write succeeds but the derived
- * `catalog.json` rebuild that follows it fails. The durable run remains on
- * disk; callers should surface this error and may retry `rebuildCatalog()`
- * later. The durable run is never deleted to compensate.
+ * Thrown when rebuilding the derived `catalog.json` fails. The failure is
+ * always reported with the context it happened in: after an authoritative
+ * save or update (the durable run is on disk and remains authoritative;
+ * callers should surface this and may retry `rebuildCatalog()` later, and
+ * the durable run is never deleted to compensate), or during an explicit
+ * `rebuildCatalog()` call (no run was mutated and the existing catalog file
+ * is left untouched).
  */
 export class CatalogRebuildError extends Error {}
 
@@ -336,6 +339,27 @@ export async function acquireLock(
   return () => releaseMarker(lockDir, markerPath);
 }
 
+/**
+ * Which operation asked for the catalog rebuild, so a failure can be
+ * reported truthfully: only the save/update contexts may claim that a run
+ * was persisted, and only the explicit-rebuild context may claim that
+ * nothing was mutated.
+ */
+type CatalogRebuildContext = 'save' | 'update' | 'rebuild';
+
+const CATALOG_REBUILD_FAILURE_MESSAGES: Record<CatalogRebuildContext, string> = {
+  save:
+    'The run was saved, but rebuilding catalog.json from validated run summaries failed. ' +
+    'The run remains authoritative; call rebuildCatalog() to retry.',
+  update:
+    'The run was updated, but rebuilding catalog.json from validated run summaries failed. ' +
+    'The updated run remains authoritative; call rebuildCatalog() to retry.',
+  rebuild:
+    'Rebuilding catalog.json from validated run summaries failed. No run was mutated and the ' +
+    'existing catalog.json is untouched; inspect the archive\'s validated run summaries and ' +
+    'call rebuildCatalog() again once they are readable.',
+};
+
 function toCatalogEntry(summary: RunSummary): CatalogEntry {
   return CatalogEntrySchema.parse({
     id: summary.id,
@@ -499,19 +523,17 @@ export class Archive {
    * validate) surfaces as `CatalogRebuildError` and leaves the existing
    * `catalog.json` file completely untouched, since `writeFileAtomic` is
    * either never reached or itself never partially replaces the target.
+   * `context` only selects the reported message, which must accurately
+   * describe what did or did not happen to the run being written (if any).
    */
-  private async rebuildCatalogLocked(): Promise<CatalogEntry[]> {
+  private async rebuildCatalogLocked(context: CatalogRebuildContext): Promise<CatalogEntry[]> {
     try {
       const summaries = await this.readAllRunSummaries();
       const entries = summaries.map(toCatalogEntry).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
       await writeFileAtomic(this.catalogPath(), `${JSON.stringify(entries, null, 2)}\n`);
       return entries;
     } catch (error) {
-      throw new CatalogRebuildError(
-        'The run was saved, but rebuilding catalog.json from validated run summaries failed. ' +
-          'The run remains authoritative; call rebuildCatalog() to retry.',
-        { cause: error },
-      );
+      throw new CatalogRebuildError(CATALOG_REBUILD_FAILURE_MESSAGES[context], { cause: error });
     }
   }
 
@@ -546,7 +568,7 @@ export class Archive {
 
       await writeRunDirectoryAtomic(this.runsDir(), targetDir, validatedSummary, validatedEvents);
 
-      await this.rebuildCatalogLocked();
+      await this.rebuildCatalogLocked('save');
 
       return validatedSummary;
     } finally {
@@ -628,7 +650,7 @@ export class Archive {
   async rebuildCatalog(): Promise<CatalogEntry[]> {
     const release = await acquireLock(this.archiveDir);
     try {
-      return await this.rebuildCatalogLocked();
+      return await this.rebuildCatalogLocked('rebuild');
     } finally {
       await release();
     }
@@ -689,7 +711,7 @@ export class Archive {
       await writeFileAtomic(path.join(dir, 'run.json'), `${JSON.stringify(finalSummary, null, 2)}\n`);
       await writeFileAtomic(path.join(dir, 'events.jsonl'), serializeEvents(finalEvents));
 
-      await this.rebuildCatalogLocked();
+      await this.rebuildCatalogLocked('update');
 
       return finalSummary;
     } finally {

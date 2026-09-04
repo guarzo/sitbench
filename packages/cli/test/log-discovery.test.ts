@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat as realStat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -91,6 +91,27 @@ describe('readRecentLogFiles', () => {
 
     expect(discovery.files.map((file) => file.name)).toEqual(['ahead.txt']);
     expect(discovery.skippedFiles).toBe(0);
+  });
+
+  it('skips a candidate whose stat fails and still reads the remaining recent files', async () => {
+    await writeLog('recent.txt', 'recent', minutesBefore(now, 60));
+    await writeLog('raced-away.txt', 'gone', minutesBefore(now, 30));
+
+    const discovery = await readRecentLogFiles(root, {
+      now,
+      stat: async (filePath) => {
+        if (path.basename(filePath) === 'raced-away.txt') {
+          // A file listed by readdir can be deleted (or become unreadable)
+          // before it is stat'd; that must never fail the whole discovery.
+          throw Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' });
+        }
+        return realStat(filePath);
+      },
+    });
+
+    expect(discovery.files.map((file) => file.name)).toEqual(['recent.txt']);
+    expect(discovery.files[0]?.text).toBe('recent');
+    expect(discovery.skippedFiles).toBe(1);
   });
 });
 

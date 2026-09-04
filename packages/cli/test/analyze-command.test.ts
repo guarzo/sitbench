@@ -33,8 +33,9 @@ function gameLog(character: string, lines: string[]): string {
 }
 
 async function writeCandidateLog(): Promise<void> {
+  const candidatePath = path.join(logsDir, 'combat.txt');
   await writeFile(
-    path.join(logsDir, 'combat.txt'),
+    candidatePath,
     gameLog('Dah Nee', [
       '[ 2026.09.03 04:00:00 ] (combat) 100 from Dah Nee[Example] - Heavy Entropic Disintegrator II - Hits Sleepless Guardian',
       '[ 2026.09.03 04:00:20 ] (combat) 120 from Dah Nee[Example] - Heavy Entropic Disintegrator II - Hits Sleepless Guardian',
@@ -43,6 +44,9 @@ async function writeCandidateLog(): Promise<void> {
     ]),
     'utf8',
   );
+  // Pin the modification time to the injected clock so recency is decided by
+  // the fixture, never by the real wall clock the suite happens to run at.
+  await utimes(candidatePath, fixedClock(), fixedClock());
 }
 
 function fixedClock(): Date {

@@ -880,3 +880,67 @@ describe('acquireLock (lock directory + per-owner marker)', () => {
     await release();
   });
 });
+
+describe('CatalogRebuildError messages', () => {
+  /**
+   * Forces a catalog rebuild failure by making catalog.json a directory, so
+   * the atomic rename onto it can never succeed.
+   */
+  async function blockCatalogWrites(): Promise<void> {
+    await mkdir(path.join(archiveDir, 'catalog.json'), { recursive: true });
+  }
+
+  async function rejectionMessage(operation: Promise<unknown>): Promise<string> {
+    const outcome = await operation.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(outcome).toBeInstanceOf(CatalogRebuildError);
+    return (outcome as Error).message;
+  }
+
+  it('says the new run was saved and remains authoritative when saveRun rebuilds the catalog', async () => {
+    await blockCatalogWrites();
+    const archive = new Archive(archiveDir);
+
+    const message = await rejectionMessage(archive.saveRun(buildSummary(), [buildEvent()]));
+
+    expect(message).toContain('saved');
+    expect(message).toContain('remains authoritative');
+    expect(message).toContain('rebuildCatalog()');
+    expect(message).not.toContain('updated');
+  });
+
+  it('says the run was updated and remains authoritative when updateRun rebuilds the catalog', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+    await rm(path.join(archiveDir, 'catalog.json'));
+    await blockCatalogWrites();
+
+    const message = await rejectionMessage(
+      archive.updateRun(summary.id, ({ summary: current, events }) => ({
+        summary: { ...current, notes: 'updated' },
+        events,
+      })),
+    );
+
+    expect(message).toContain('updated');
+    expect(message).toContain('remains authoritative');
+    expect(message).toContain('rebuildCatalog()');
+    expect(message).not.toContain('The run was saved');
+  });
+
+  it('never claims a run was saved or updated when an explicit rebuildCatalog fails', async () => {
+    await blockCatalogWrites();
+    const archive = new Archive(archiveDir);
+
+    const message = await rejectionMessage(archive.rebuildCatalog());
+
+    expect(message).toContain('catalog.json');
+    expect(message).toContain('untouched');
+    expect(message).not.toContain('saved');
+    expect(message).not.toContain('updated');
+    expect(message).not.toContain('remains authoritative');
+  });
+});

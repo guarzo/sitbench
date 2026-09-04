@@ -34,17 +34,28 @@ function pickBest(candidates: RunSummary[]): RunSummary | null {
 
 /**
  * Compares `current` against `allRuns`, matching only runs sharing the exact
- * `(site.key, fleetProfile.id)` pair. Matching runs are ordered chronologically
- * by `createdAt` (ties broken by `id`) relative to `current`; no run recorded
- * after `current` ever contributes to `previous`, `best`, or the trailing-five
- * average. `best` is evaluated over matching runs up to and including
- * `current` itself, so a personal-best run is its own best. Ties for `best`
- * resolve to whichever run was recorded earliest.
+ * `(site.key, fleetProfile.id)` pair. The supplied `current` object is
+ * authoritative for its own id and is always part of the matching set
+ * exactly once: it is included even when `allRuns` omits it (e.g. a run that
+ * has just been computed but not yet archived), and any same-id entry in
+ * `allRuns` is treated as a stale copy and replaced by it. Matching runs are
+ * ordered chronologically by `createdAt` (ties broken by `id`) relative to
+ * `current`; no run recorded after `current` ever contributes to `previous`,
+ * `best`, or the trailing-five average. `best` is evaluated over matching
+ * runs up to and including `current` itself, so a personal-best run is its
+ * own best; `previous` and the trailing-five average exclude `current`. Ties
+ * for `best` resolve to whichever run was recorded earliest.
  */
 export function compareMatchingRuns(current: RunSummary, allRuns: RunSummary[]): RunComparison {
-  const matching = allRuns.filter(
-    (run) => run.site.key === current.site.key && run.fleetProfile.id === current.fleetProfile.id,
-  );
+  const matching = [
+    current,
+    ...allRuns.filter(
+      (run) =>
+        run.id !== current.id &&
+        run.site.key === current.site.key &&
+        run.fleetProfile.id === current.fleetProfile.id,
+    ),
+  ];
 
   const notInTheFuture = matching
     .filter((run) => chronoCompare(run, current) <= 0)

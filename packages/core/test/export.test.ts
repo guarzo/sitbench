@@ -4,6 +4,7 @@ import {
   buildPublicDashboardDataset,
   LocalDashboardDatasetSchema,
   PublicDashboardDatasetSchema,
+  PublicRunSummarySchema,
   DashboardDatasetSchema,
 } from '../src/export.js';
 import type { RunSummary } from '../src/schemas.js';
@@ -224,6 +225,41 @@ describe('Zod dataset schemas', () => {
     const localResult = DashboardDatasetSchema.safeParse(localData);
     expect(localResult.success).toBe(true);
     if (localResult.success) expect(localResult.data.mode).toBe('local');
+  });
+
+  it.each([
+    ['base', {}],
+    ['characters', { includeCharacters: true }],
+    ['notes', { includeNotes: true }],
+    ['both', { includeCharacters: true, includeNotes: true }],
+  ])('PublicRunSummarySchema accepts the %s public run shape', (_name, options) => {
+    const dataset = buildPublicDashboardDataset([buildRun({ windowStart: '2026-09-01T10:00:00.000Z' })], options);
+    const result = PublicRunSummarySchema.safeParse(dataset.runs[0]);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data).toEqual(dataset.runs[0]);
+  });
+
+  it('PublicRunSummarySchema rejects a run carrying an unknown key in every shape', () => {
+    const dataset = buildPublicDashboardDataset([buildRun({ windowStart: '2026-09-01T10:00:00.000Z' })], {
+      includeCharacters: true,
+      includeNotes: true,
+    });
+    const result = PublicRunSummarySchema.safeParse({ ...dataset.runs[0], fingerprint: 'leaked' });
+    expect(result.success).toBe(false);
+  });
+
+  it('PublicDashboardDatasetSchema rejects a run whose shape does not match the declared capabilities', () => {
+    const withCharacters = buildPublicDashboardDataset(
+      [buildRun({ windowStart: '2026-09-01T10:00:00.000Z' })],
+      { includeCharacters: true },
+    );
+    // A valid "characters" run shape, but the dataset claims characters=false.
+    const mismatched = { ...withCharacters, capabilities: { characters: false, notes: false } };
+
+    expect(PublicDashboardDatasetSchema.safeParse(mismatched).success).toBe(false);
+    // The run shape itself is still individually valid; only the
+    // capability/shape agreement fails.
+    expect(PublicRunSummarySchema.safeParse(withCharacters.runs[0]).success).toBe(true);
   });
 });
 

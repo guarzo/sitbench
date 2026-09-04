@@ -150,4 +150,34 @@ describe('compareMatchingRuns', () => {
     expect(result.previous).toEqual(onlyPrior);
     expect(result.trailingFiveAverageElapsedSeconds).toBeCloseTo(640);
   });
+
+  it('still counts the current run itself when allRuns does not contain it', () => {
+    const slowerPrior = buildRun({ elapsedSeconds: 900, createdAt: '2026-09-01T00:00:00.000Z' });
+    const current = buildRun({ elapsedSeconds: 500, createdAt: '2026-09-02T00:00:00.000Z' });
+
+    const result = compareMatchingRuns(current, [slowerPrior]);
+
+    expect(result.previous).toEqual(slowerPrior);
+    expect(result.best).toEqual(current);
+    expect(result.trailingFiveAverageElapsedSeconds).toBeCloseTo(900);
+  });
+
+  it('prefers the supplied current run over a stale same-id copy in allRuns and never counts it twice', () => {
+    const prior = buildRun({ elapsedSeconds: 800, createdAt: '2026-09-01T00:00:00.000Z' });
+    const current = buildRun({ elapsedSeconds: 500, createdAt: '2026-09-02T00:00:00.000Z' });
+    // A stale copy of the same run (same id) that a caller's list has not
+    // caught up with yet: it must never win `best` over the supplied
+    // current object, nor appear in the trailing-five window.
+    const staleSameId = buildRun({
+      elapsedSeconds: 10,
+      createdAt: '2026-09-02T00:00:00.000Z',
+      id: current.id,
+    });
+
+    const result = compareMatchingRuns(current, [prior, staleSameId]);
+
+    expect(result.best).toEqual(current);
+    expect(result.previous).toEqual(prior);
+    expect(result.trailingFiveAverageElapsedSeconds).toBeCloseTo(800);
+  });
 });

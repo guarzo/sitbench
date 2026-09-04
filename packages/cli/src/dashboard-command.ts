@@ -181,6 +181,12 @@ export interface DashboardServerDependencies {
     options: { public: string; directoryListing: boolean },
   ) => Promise<void>;
   onError?: (error: unknown) => void;
+  /**
+   * Narrow test seam for constructing the underlying HTTP server, so a test
+   * can hold the server instance and drive a server-level failure. Production
+   * always uses `node:http`'s `createServer`.
+   */
+  createServer?: (requestListener: (request: IncomingMessage, response: ServerResponse) => void) => Server;
 }
 
 /**
@@ -212,7 +218,12 @@ function respondWithHandlerFailure(response: ServerResponse): void {
  * directory listing is disabled as further defense in depth. The handler's
  * promise is always observed: a rejection is turned into a 500 (or a clean
  * end for an already-started response) and reported through `onError`,
- * never left floating as an unhandled rejection.
+ * never left floating as an unhandled rejection. The listener registered to
+ * reject a failed startup is removed as soon as the server is listening, and
+ * replaced (inside the same listen callback, so there is no window without
+ * an error listener) by one that reports later server-level failures through
+ * `onError` — otherwise the very first post-startup error would be consumed
+ * by the already-settled startup promise and silently lost.
  */
 export async function startDashboardServer(
   rootDir: string,
@@ -220,7 +231,8 @@ export async function startDashboardServer(
   dependencies: DashboardServerDependencies = {},
 ): Promise<RunningDashboardServer> {
   const handler = dependencies.handler ?? ((request, response, options) => serveHandler(request, response, options));
-  const server: Server = createServer((request, response) => {
+  const createHttpServer = dependencies.createServer ?? createServer;
+  const server: Server = createHttpServer((request, response) => {
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       response.statusCode = 405;
       response.end();
@@ -244,8 +256,20 @@ export async function startDashboardServer(
   });
 
   await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, '127.0.0.1', () => resolve());
+    const rejectStartup = (error: Error): void => {
+      reject(error);
+    };
+    server.once('error', rejectStartup);
+    server.listen(port, '127.0.0.1', () => {
+      server.removeListener('error', rejectStartup);
+      const { onError } = dependencies;
+      if (onError !== undefined) {
+        server.on('error', (error) => {
+          onError(error);
+        });
+      }
+      resolve();
+    });
   });
 
   const address = server.address();

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -113,7 +113,22 @@ describe('regenerateDashboardData', () => {
   it('does not include event data in the output', async () => {
     const archive = new Archive(archiveDir);
     const summary = buildSummary('run-a', '2026-09-01T10:00:00.000Z');
-    await archive.saveRun(summary, []);
+    // A real archived event carrying local source provenance: if the export
+    // ever leaked event data, these exact keys would appear in runs.json.
+    const event: NormalizedEvent = {
+      kind: 'damage-dealt',
+      timestamp: '2026-09-01T10:00:00.000Z',
+      observedBy: 'Alpha',
+      sourceFile: 'combat.txt',
+      sourceLine: 42,
+      raw: '[ 2026.09.01 10:00:00 ] (combat) 100 from Alpha - Hits Sleepless Guardian',
+      actor: 'Alpha',
+      target: 'Sleepless Guardian',
+      amount: 100,
+      hitQuality: null,
+      targetClassification: 'npc',
+    };
+    await archive.saveRun(summary, [event]);
 
     await regenerateDashboardData(archive, archiveDir);
 
@@ -122,6 +137,7 @@ describe('regenerateDashboardData', () => {
     expect(content).not.toContain('"sourceFile"');
     expect(content).not.toContain('"sourceLine"');
     expect(content).not.toContain('"raw"');
+    expect(content).not.toContain('combat.txt');
   });
 });
 
@@ -141,8 +157,10 @@ describe('derivative warning accumulation', () => {
   it('reports saved-with-warning when injected dashboard hook throws', async () => {
     const logsDir = path.join(root, 'logs');
     await mkdir(logsDir);
+    const candidatePath = path.join(logsDir, 'combat.txt');
+    const clock = (): Date => new Date('2026-09-03T05:05:12.000Z');
     await writeFile(
-      path.join(logsDir, 'combat.txt'),
+      candidatePath,
       gameLog('Dah Nee', [
         '[ 2026.09.03 04:00:00 ] (combat) 100 from Dah Nee[Example] - Heavy Entropic Disintegrator II - Hits Sleepless Guardian',
         '[ 2026.09.03 04:00:20 ] (combat) 120 from Dah Nee[Example] - Heavy Entropic Disintegrator II - Hits Sleepless Guardian',
@@ -151,12 +169,15 @@ describe('derivative warning accumulation', () => {
       ]),
       'utf8',
     );
+    // Pin the modification time to the injected clock so this fixture stays
+    // inside the recent-log window regardless of the real current date.
+    await utimes(candidatePath, clock(), clock());
     const output: string[] = [];
     const result = await runAnalyze(
       { logs: logsDir, archive: archiveDir },
       {
         prompts: newestWindowPrompts,
-        clock: () => new Date('2026-09-03T05:05:12.000Z'),
+        clock,
         write: (line) => output.push(line),
         rebuildCatalog: async () => { throw new Error('dashboard boom'); },
       },

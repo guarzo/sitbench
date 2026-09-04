@@ -1,6 +1,24 @@
 import { describe, expect, it } from 'vitest';
-import { formatSignedCount, formatSignedSeconds } from '../src/format.js';
+import { formatElapsed, formatSignedCount, formatSignedSeconds } from '../src/format.js';
 import { metricDelta } from '../src/delta.js';
+
+describe('formatElapsed', () => {
+  it('formats a sub-minute duration in seconds only', () => {
+    expect(formatElapsed(45)).toBe('45s');
+    expect(formatElapsed(59.4)).toBe('59s');
+  });
+
+  it('rolls a duration that rounds up to a full minute into the minutes component', () => {
+    expect(formatElapsed(59.6)).toBe('1m 0s');
+    expect(formatElapsed(119.6)).toBe('2m 0s');
+  });
+
+  it('formats whole minutes and remainders without a 60-second component', () => {
+    expect(formatElapsed(60)).toBe('1m 0s');
+    expect(formatElapsed(600)).toBe('10m 0s');
+    expect(formatElapsed(742)).toBe('12m 22s');
+  });
+});
 
 describe('formatSignedSeconds', () => {
   it('prefixes a positive duration delta with a plus and a seconds unit', () => {
