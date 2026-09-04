@@ -1,4 +1,5 @@
 import { DatasetSchemaError, loadDataset, type DashboardDataset, type DashboardRun } from './data.js';
+import { comparisonOrder } from './compare.js';
 import { renderCompare } from './compare-view.js';
 import { renderDetail } from './detail.js';
 import { renderHistory, type SortDir, type SortField } from './history.js';
@@ -149,15 +150,20 @@ function update(): void {
   // Reconcile selections with matched set
   reconcileSelections(state);
 
+  // Comparison-ordered runs: (createdAt, id) for local, (comparisonOrder, id) for public
+  const comparisonSorted = matched.slice().sort(comparisonOrder);
+
   const currentSel = selectedRun(state);
-  const selIndex = currentSel !== null ? matched.findIndex((r) => r.id === currentSel.id) : -1;
+  const selCompIdx = currentSel !== null ? comparisonSorted.findIndex((r) => r.id === currentSel.id) : -1;
+  // Trend chart uses dataset natural order (window.start)
+  const selTrendIdx = currentSel !== null ? matched.findIndex((r) => r.id === currentSel.id) : -1;
 
   renderFilters(state.dataset, state);
-  renderOverview(qs('#overview'), matched, selIndex, state.dataset);
+  renderOverview(qs('#overview'), comparisonSorted, selCompIdx, state.dataset);
   renderTrends(qs('#trends'), matched, currentTrendMetric, (metric) => {
     currentTrendMetric = metric;
     update();
-  }, selIndex >= 0 ? selIndex : null);
+  }, selTrendIdx >= 0 ? selTrendIdx : null);
   renderHistory(qs('#history'), matched, state.selectedRunId, (runId) => {
     if (state === null) return;
     state.selectedRunId = runId;
@@ -173,8 +179,8 @@ function update(): void {
   renderDetail(qs('#detail'), currentSel, state.dataset.capabilities);
 
   // Compare: default right to previous if not set and in matched set
-  if (state.compareRunId === null && selIndex > 0) {
-    state.compareRunId = matched[selIndex - 1]!.id;
+  if (state.compareRunId === null && selCompIdx > 0) {
+    state.compareRunId = comparisonSorted[selCompIdx - 1]!.id;
   }
   renderCompare(
     qs('#compare'),

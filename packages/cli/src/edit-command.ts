@@ -235,20 +235,27 @@ export async function runEdit(arguments_: EditArguments, dependencies: EditDepen
   }
 
   // Derivative generation: each attempted independently.
+  const derivativeWarnings: string[] = [];
+  if (catalogWarning !== null) derivativeWarnings.push(`catalog: ${catalogWarning}`);
+
   try {
     await archive.upsertProfile(profileName);
-  } catch {
-    // Non-critical
+  } catch (error) {
+    derivativeWarnings.push(`profile: ${message(error)}`);
   }
   try {
     await (dependencies.rebuildCatalog ?? rebuildCatalogNoop)(archive);
-  } catch {
-    // Non-critical
+  } catch (error) {
+    derivativeWarnings.push(`dashboard: ${message(error)}`);
   }
 
-  if (catalogWarning !== null) {
-    write(`Run ${runId} was updated, but its catalog could not be rebuilt: ${catalogWarning}`);
-    return { status: 'updated-with-warning', id: runId, reason: 'catalog' };
+  if (derivativeWarnings.length > 0) {
+    if (derivativeWarnings.length === 1 && catalogWarning !== null) {
+      write(`Run ${runId} was updated, but its catalog could not be rebuilt: ${catalogWarning}`);
+      return { status: 'updated-with-warning', id: runId, reason: 'catalog' };
+    }
+    write(`Run ${runId} was updated, but follow-up generation failed: ${derivativeWarnings.join('; ')}`);
+    return { status: 'updated-with-warning', id: runId, reason: 'post-save' };
   }
 
   write(`Updated run ${runId}.`);

@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { alignCharacterRows, bestRunUpTo, previousRun, trailingFiveAverage, trailingFiveRuns } from '../src/compare.js';
-import type { CharacterMetrics } from '@sitbench/core';
+import { alignCharacterRows, bestRunUpTo, comparisonOrder, previousRun, trailingFiveAverage, trailingFiveRuns } from '../src/compare.js';
+import { compareMatchingRuns, type CharacterMetrics, type RunSummary } from '@sitbench/core';
 import type { DashboardRun } from '../src/data.js';
-import type { RunSummary } from '@sitbench/core';
 
 let idCounter = 0;
 
@@ -196,5 +195,34 @@ describe('alignCharacterRows', () => {
     const aligned = alignCharacterRows(left, right);
 
     expect(aligned.map((r) => r.character)).toEqual(['Alpha', 'Bravo', 'Charlie']);
+  });
+});
+
+describe('comparisonOrder for local runs', () => {
+  it('sorts by createdAt then id, matching core compareMatchingRuns chronology', () => {
+    // Run A was created AFTER run B but has an EARLIER window.start.
+    // Core compareMatchingRuns uses createdAt for chronology; dashboard must match.
+    const runA = {
+      ...buildRun({ windowStart: '2026-09-01T10:00:00.000Z', elapsed: 700 }),
+      createdAt: '2026-09-03T00:00:00.000Z',
+      updatedAt: '2026-09-03T00:00:00.000Z',
+    };
+    const runB = {
+      ...buildRun({ windowStart: '2026-09-02T10:00:00.000Z', elapsed: 600 }),
+      createdAt: '2026-09-02T00:00:00.000Z',
+      updatedAt: '2026-09-02T00:00:00.000Z',
+    };
+
+    // Core says: ordered by createdAt, B (created 09-02) is before A (created 09-03)
+    const coreResult = compareMatchingRuns(runA, [runA, runB]);
+    expect(coreResult.previous?.id).toBe(runB.id);
+
+    // Dashboard comparisonOrder must produce the same ordering
+    const ordered = [runA, runB].sort(comparisonOrder);
+    expect(ordered[0]!.id).toBe(runB.id);
+    expect(ordered[1]!.id).toBe(runA.id);
+
+    // So previous of runA (index 1) should be runB (index 0)
+    expect(previousRun(ordered, 1)?.id).toBe(runB.id);
   });
 });

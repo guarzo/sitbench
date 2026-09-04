@@ -1,5 +1,33 @@
-import type { CharacterMetrics } from '@sitbench/core';
+import type { CharacterMetrics } from '@sitbench/core/export';
 import type { DashboardRun } from './data.js';
+
+// ---------------------------------------------------------------------------
+// Comparison chronology
+// ---------------------------------------------------------------------------
+
+/**
+ * Comparison order for local runs: `(createdAt, id)`, matching core's
+ * `compareMatchingRuns`. Local RunSummary always has createdAt. Public runs
+ * have `comparisonOrder` instead — callers use that field directly.
+ */
+export function comparisonOrder(a: DashboardRun, b: DashboardRun): number {
+  // Local runs (have createdAt)
+  if ('createdAt' in a && 'createdAt' in b) {
+    const cmp = (a as { createdAt: string }).createdAt.localeCompare((b as { createdAt: string }).createdAt);
+    if (cmp !== 0) return cmp;
+    return a.id.localeCompare(b.id);
+  }
+  // Public runs (have comparisonOrder)
+  if ('comparisonOrder' in a && 'comparisonOrder' in b) {
+    const cmp = (a as { comparisonOrder: number }).comparisonOrder - (b as { comparisonOrder: number }).comparisonOrder;
+    if (cmp !== 0) return cmp;
+    return a.id.localeCompare(b.id);
+  }
+  // Fallback: window.start + id
+  const cmp = a.window.start.localeCompare(b.window.start);
+  if (cmp !== 0) return cmp;
+  return a.id.localeCompare(b.id);
+}
 
 // ---------------------------------------------------------------------------
 // Trailing-five helper

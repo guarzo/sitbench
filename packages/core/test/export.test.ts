@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildLocalDashboardDataset } from '../src/export.js';
+import { buildLocalDashboardDataset, LocalDashboardDatasetSchema, PublicDashboardDatasetSchema, DashboardDatasetSchema } from '../src/export.js';
 import type { RunSummary } from '../src/schemas.js';
 
 let idCounter = 0;
@@ -169,5 +169,54 @@ describe('buildLocalDashboardDataset', () => {
     expect(dataset.runs).toHaveLength(2);
     expect(dataset.runs[0]!.site.key).toBe('site-a');
     expect(dataset.runs[1]!.site.key).toBe('site-b');
+  });
+});
+
+describe('Zod dataset schemas', () => {
+  it('LocalDashboardDatasetSchema rejects unknown top-level keys', () => {
+    const base = buildLocalDashboardDataset([buildRun({ windowStart: '2026-09-01T10:00:00.000Z' })]);
+    const withExtra = { ...base, extraTopLevel: true };
+    const result = LocalDashboardDatasetSchema.safeParse(withExtra);
+    expect(result.success).toBe(false);
+  });
+
+  it('LocalDashboardDatasetSchema rejects unknown keys in nested run objects', () => {
+    const base = buildLocalDashboardDataset([buildRun({ windowStart: '2026-09-01T10:00:00.000Z' })]);
+    const corrupted = { ...base, runs: [{ ...base.runs[0], unknownNestedField: 42 }] };
+    const result = LocalDashboardDatasetSchema.safeParse(corrupted);
+    expect(result.success).toBe(false);
+  });
+
+  it('LocalDashboardDatasetSchema accepts output of buildLocalDashboardDataset', () => {
+    const dataset = buildLocalDashboardDataset([buildRun({ windowStart: '2026-09-01T10:00:00.000Z' })]);
+    const result = LocalDashboardDatasetSchema.safeParse(dataset);
+    expect(result.success).toBe(true);
+  });
+
+  it('PublicDashboardDatasetSchema requires comparisonOrder on runs', () => {
+    const result = PublicDashboardDatasetSchema.safeParse({
+      schemaVersion: 1,
+      mode: 'public',
+      generatedAt: '2026-09-01T10:00:00.000Z',
+      capabilities: { characters: false, notes: false },
+      runs: [{
+        id: 'run-1',
+        site: { name: 'S', key: 's' },
+        fleetProfile: { id: 'p', name: 'P' },
+        window: { start: '2026-09-01T10:00:00.000Z', end: '2026-09-01T10:10:00.000Z', source: 'test', manuallyAdjusted: false },
+        calculation: { episodeThresholdSeconds: 180, activeCombatGapSeconds: 30 },
+        metrics: { elapsedSeconds: 600, activeCombatSeconds: 540, idleSeconds: 60, fleetDamageDealt: 120000, averageFleetDps: 200, activeFleetDps: 222, damageTaken: 0, remoteRepairDelivered: 0, participantCount: 1 },
+        coverage: { logFiles: 1, participantsWithOutgoingDamage: 1, unparsedCombatLines: 0, ambiguousEventsExcluded: 0, repairPairing: 'full' },
+        // missing comparisonOrder
+      }],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('DashboardDatasetSchema discriminates local vs public by mode', () => {
+    const localData = buildLocalDashboardDataset([buildRun({ windowStart: '2026-09-01T10:00:00.000Z' })]);
+    const localResult = DashboardDatasetSchema.safeParse(localData);
+    expect(localResult.success).toBe(true);
+    if (localResult.success) expect(localResult.data.mode).toBe('local');
   });
 });

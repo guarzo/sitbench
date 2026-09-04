@@ -1,11 +1,12 @@
+import { DashboardDatasetSchema } from '@sitbench/core/export';
 import type {
   DashboardCapabilities,
   DashboardDataset,
   LocalDashboardDataset,
   PublicDashboardDataset,
   PublicRunSummary,
-} from '@sitbench/core';
-import type { RunSummary } from '@sitbench/core';
+} from '@sitbench/core/export';
+import type { RunSummary } from '@sitbench/core/export';
 
 // ---------------------------------------------------------------------------
 // Re-export dataset types for dashboard consumers
@@ -32,87 +33,27 @@ export class DatasetSchemaError extends Error {
 export type DashboardRun = RunSummary | PublicRunSummary;
 
 // ---------------------------------------------------------------------------
-// Strict validation helpers
-// ---------------------------------------------------------------------------
-
-function assertObject(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new DatasetSchemaError(`${label} must be a JSON object.`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function assertBoolean(value: unknown, label: string): boolean {
-  if (typeof value !== 'boolean') {
-    throw new DatasetSchemaError(`${label} must be a boolean.`);
-  }
-  return value;
-}
-
-/** Minimal run-shape validation: id, site, fleetProfile, window, metrics, coverage. */
-function validateRunShape(run: unknown, index: number): void {
-  const obj = assertObject(run, `runs[${String(index)}]`);
-  if (typeof obj.id !== 'string' || obj.id.length === 0) {
-    throw new DatasetSchemaError(`runs[${String(index)}].id must be a non-empty string.`);
-  }
-  assertObject(obj.site, `runs[${String(index)}].site`);
-  assertObject(obj.fleetProfile, `runs[${String(index)}].fleetProfile`);
-  assertObject(obj.window, `runs[${String(index)}].window`);
-  assertObject(obj.metrics, `runs[${String(index)}].metrics`);
-  assertObject(obj.coverage, `runs[${String(index)}].coverage`);
-}
-
-// ---------------------------------------------------------------------------
 // Loader / validator
 // ---------------------------------------------------------------------------
 
 /**
- * Validates a parsed JSON object as a `DashboardDataset`. Rejects unknown
- * modes, non-boolean capabilities, invalid local fixed capabilities, and
- * runs missing required fields. Callers should catch `DatasetSchemaError`
- * and render a clear error state rather than showing misleading partial
- * metrics.
+ * Validates a parsed JSON value as a `DashboardDataset` using the strict Zod
+ * schemas defined in `@sitbench/core/export`. Rejects unknown keys, invalid
+ * nested timestamps, non-boolean capabilities, and capability/field
+ * inconsistencies. Callers should catch `DatasetSchemaError` and render a
+ * clear error state rather than showing misleading partial metrics.
  */
 export function validateDataset(raw: unknown): DashboardDataset {
-  const obj = assertObject(raw, 'Dashboard dataset');
-
-  if (obj.schemaVersion !== 1) {
+  const result = DashboardDatasetSchema.safeParse(raw);
+  if (!result.success) {
+    const firstIssue = result.error.issues[0];
+    const path = firstIssue?.path.join('.') ?? '';
+    const message = firstIssue?.message ?? 'Unknown validation error';
     throw new DatasetSchemaError(
-      `Unsupported schema version: ${String(obj.schemaVersion)}. Expected 1.`,
+      `Invalid dashboard dataset${path.length > 0 ? ` at ${path}` : ''}: ${message}`,
     );
   }
-  if (obj.mode !== 'local' && obj.mode !== 'public') {
-    throw new DatasetSchemaError(
-      `Unknown dataset mode: ${String(obj.mode)}. Expected "local" or "public".`,
-    );
-  }
-  if (typeof obj.generatedAt !== 'string') {
-    throw new DatasetSchemaError('Missing or invalid generatedAt timestamp.');
-  }
-
-  // Validate capabilities
-  const caps = assertObject(obj.capabilities, 'capabilities');
-  const characters = assertBoolean(caps.characters, 'capabilities.characters');
-  const notes = assertBoolean(caps.notes, 'capabilities.notes');
-
-  // Local mode requires both capabilities true
-  if (obj.mode === 'local') {
-    if (characters !== true || notes !== true) {
-      throw new DatasetSchemaError(
-        'Local dataset must have capabilities { characters: true, notes: true }.',
-      );
-    }
-  }
-
-  // Validate runs array
-  if (!Array.isArray(obj.runs)) {
-    throw new DatasetSchemaError('Missing or invalid runs array.');
-  }
-  for (let i = 0; i < obj.runs.length; i++) {
-    validateRunShape(obj.runs[i], i);
-  }
-
-  return obj as unknown as DashboardDataset;
+  return result.data as DashboardDataset;
 }
 
 /**

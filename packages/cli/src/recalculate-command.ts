@@ -202,14 +202,18 @@ async function recalculateOne(
 
   // Derivative: dashboard regeneration — always attempted after successful
   // authoritative mutation, including after CatalogRebuildError.
+  let dashboardWarning: string | null = null;
   try {
     await (dependencies.rebuildCatalog ?? rebuildCatalogNoop)(archive);
-  } catch {
-    // Non-critical
+  } catch (error) {
+    dashboardWarning = message(error);
   }
 
-  if (catalogWarning !== null) {
-    return { id, status: 'recalculated-with-warning', reason: catalogWarning };
+  if (catalogWarning !== null || dashboardWarning !== null) {
+    const parts: string[] = [];
+    if (catalogWarning !== null) parts.push(`catalog: ${catalogWarning}`);
+    if (dashboardWarning !== null) parts.push(`dashboard: ${dashboardWarning}`);
+    return { id, status: 'recalculated-with-warning', reason: parts.join('; ') };
   }
 
   return { id, status: 'recalculated' };

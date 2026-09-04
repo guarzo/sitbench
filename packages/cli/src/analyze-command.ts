@@ -216,16 +216,19 @@ export async function runAnalyze(
   }
 
   // Derivative generation: dashboard data, profile upsert, config save.
-  // Each is attempted independently; failures become warnings.
+  // Each is attempted independently; failures accumulate as warnings.
+  const derivativeWarnings: string[] = [];
+  if (catalogWarning !== null) derivativeWarnings.push(`catalog: ${catalogWarning}`);
+
   try {
     await archive.upsertProfile(profileName);
-  } catch {
-    // Non-critical
+  } catch (error) {
+    derivativeWarnings.push(`profile: ${message(error)}`);
   }
   try {
     await (dependencies.rebuildCatalog ?? rebuildCatalogNoop)(archive);
-  } catch {
-    // Non-critical
+  } catch (error) {
+    derivativeWarnings.push(`dashboard: ${message(error)}`);
   }
   try {
     await saveConfig(archiveDirectory, {
@@ -233,13 +236,18 @@ export async function runAnalyze(
       episodeThresholdSeconds: config.episodeThresholdSeconds,
       activeCombatGapSeconds: config.activeCombatGapSeconds,
     });
-  } catch {
-    // Non-critical
+  } catch (error) {
+    derivativeWarnings.push(`config: ${message(error)}`);
   }
 
-  if (catalogWarning !== null) {
-    write(`Run ${summary.id} was saved, but its catalog could not be rebuilt: ${catalogWarning}`);
-    return { status: 'saved-with-warning', id: summary.id, reason: 'catalog' };
+  if (derivativeWarnings.length > 0) {
+    if (derivativeWarnings.length === 1 && catalogWarning !== null) {
+      // Backward-compatible catalog-only message
+      write(`Run ${summary.id} was saved, but its catalog could not be rebuilt: ${catalogWarning}`);
+      return { status: 'saved-with-warning', id: summary.id, reason: 'catalog' };
+    }
+    write(`Run ${summary.id} was saved, but follow-up generation failed: ${derivativeWarnings.join('; ')}`);
+    return { status: 'saved-with-warning', id: summary.id, reason: 'post-save' };
   }
 
   write(`Saved run ${summary.id}.`);

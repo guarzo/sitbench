@@ -2,8 +2,10 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { Archive, type RunSummary } from '@sitbench/core';
+import { Archive, type RunSummary, type NormalizedEvent } from '@sitbench/core';
 import { regenerateDashboardData } from '../src/dashboard-export.js';
+import { runAnalyze, type AnalyzePrompts } from '../src/analyze-command.js';
+import { runRecalculate } from '../src/recalculate-command.js';
 
 let root: string;
 let archiveDir: string;
@@ -120,5 +122,69 @@ describe('regenerateDashboardData', () => {
     expect(content).not.toContain('"sourceFile"');
     expect(content).not.toContain('"sourceLine"');
     expect(content).not.toContain('"raw"');
+  });
+});
+
+describe('derivative warning accumulation', () => {
+  const newestWindowPrompts: AnalyzePrompts = {
+    confirmCandidate: async () => ({ action: 'accept' }),
+    requestSite: async () => 'Core Bastion',
+    requestProfile: async () => '8 Kikis + 2 Deacons',
+    requestNotes: async () => null,
+    confirmSave: async () => true,
+  };
+
+  function gameLog(character: string, lines: string[]): string {
+    return ['------------------------------------------------------------', '  Gamelog', `  Listener: ${character}`, '------------------------------------------------------------', ...lines].join('\n');
+  }
+
+  it('reports saved-with-warning when injected dashboard hook throws', async () => {
+    const logsDir = path.join(root, 'logs');
+    await mkdir(logsDir);
+    await writeFile(
+      path.join(logsDir, 'combat.txt'),
+      gameLog('Dah Nee', [
+        '[ 2026.09.03 04:00:00 ] (combat) 100 from Dah Nee[Example] - Heavy Entropic Disintegrator II - Hits Sleepless Guardian',
+        '[ 2026.09.03 04:00:20 ] (combat) 120 from Dah Nee[Example] - Heavy Entropic Disintegrator II - Hits Sleepless Guardian',
+        '[ 2026.09.03 04:04:00 ] (combat) 130 from Dah Nee[Example] - Heavy Entropic Disintegrator II - Hits Sleepless Guardian',
+        '[ 2026.09.03 04:04:20 ] (combat) 140 from Dah Nee[Example] - Heavy Entropic Disintegrator II - Hits Sleepless Guardian',
+      ]),
+      'utf8',
+    );
+    const output: string[] = [];
+    const result = await runAnalyze(
+      { logs: logsDir, archive: archiveDir },
+      {
+        prompts: newestWindowPrompts,
+        clock: () => new Date('2026-09-03T05:05:12.000Z'),
+        write: (line) => output.push(line),
+        rebuildCatalog: async () => { throw new Error('dashboard boom'); },
+      },
+    );
+
+    expect(result.status).toBe('saved-with-warning');
+    expect(output.join('\n')).toContain('dashboard');
+  });
+
+  it('recalculate reports warning when dashboard hook throws', async () => {
+    const archive = new Archive(archiveDir);
+    const event: NormalizedEvent = {
+      kind: 'damage-dealt', timestamp: '2026-09-01T10:00:00.000Z', observedBy: 'Alpha',
+      sourceFile: 'log.txt', sourceLine: 1, raw: 'raw', actor: 'Alpha', target: 'NPC',
+      amount: 100, hitQuality: null, targetClassification: 'npc',
+    };
+    await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), [event]);
+
+    const result = await runRecalculate(
+      { runId: 'run-a', archive: archiveDir },
+      {
+        write: () => undefined,
+        rebuildCatalog: async () => { throw new Error('dashboard boom'); },
+      },
+    );
+
+    expect(result.status).toBe('ok');
+    const outcome = result.status === 'ok' ? result.outcomes[0] : undefined;
+    expect(outcome?.status).toBe('recalculated-with-warning');
   });
 });

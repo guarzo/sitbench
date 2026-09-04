@@ -7,6 +7,7 @@ import { renderCompare } from '../src/compare-view.js';
 function buildPublicRun(id: string): PublicRunSummary {
   return {
     id,
+    comparisonOrder: 0,
     site: { name: 'Core Bastion', key: 'core-bastion' },
     fleetProfile: { id: 'default', name: 'Default' },
     window: { start: '2026-09-01T10:00:00.000Z', end: '2026-09-01T10:10:00.000Z', source: 'outgoing-npc-damage', manuallyAdjusted: false },
@@ -146,6 +147,36 @@ describe('dataset mode validation', () => {
       runs: [{ bogus: true }],
     })).toThrow(DatasetSchemaError);
   });
+
+  it('rejects unknown top-level keys in the dataset', () => {
+    expect(() => validateDataset({
+      schemaVersion: 1,
+      mode: 'local',
+      generatedAt: new Date().toISOString(),
+      capabilities: { characters: true, notes: true },
+      runs: [],
+      injectedMalice: true,
+    })).toThrow(DatasetSchemaError);
+  });
+
+  it('rejects a run with an invalid window.start timestamp', () => {
+    expect(() => validateDataset({
+      schemaVersion: 1,
+      mode: 'public',
+      generatedAt: new Date().toISOString(),
+      capabilities: { characters: false, notes: false },
+      runs: [{
+        id: 'run-1',
+        site: { name: 'S', key: 's' },
+        fleetProfile: { id: 'p', name: 'P' },
+        window: { start: 'not-a-date', end: '2026-09-01T10:10:00.000Z', source: 'test', manuallyAdjusted: false },
+        calculation: { episodeThresholdSeconds: 180, activeCombatGapSeconds: 30 },
+        metrics: { elapsedSeconds: 600, activeCombatSeconds: 540, idleSeconds: 60, fleetDamageDealt: 0, averageFleetDps: 0, activeFleetDps: 0, damageTaken: 0, remoteRepairDelivered: 0, participantCount: 0 },
+        coverage: { logFiles: 0, participantsWithOutgoingDamage: 0, unparsedCombatLines: 0, ambiguousEventsExcluded: 0, repairPairing: 'none' },
+        comparisonOrder: 0,
+      }],
+    })).toThrow(DatasetSchemaError);
+  });
 });
 
 describe('public capability combinations', () => {
@@ -211,6 +242,7 @@ describe('capability-gated DOM rendering', () => {
     const base = buildPublicRun('dom-run');
     return {
       ...base,
+      comparisonOrder: 0,
       ...(capabilities.characters
         ? {
             participants: ['Alpha'],
