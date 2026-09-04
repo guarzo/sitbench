@@ -1,5 +1,6 @@
 import { confirm, input, select } from '@inquirer/prompts';
 import type { AnalyzePrompts, CandidateChoice } from './analyze-command.js';
+import type { EditPrompts, WindowEditChoice } from './edit-command.js';
 
 interface InputConfiguration {
   message: string;
@@ -113,6 +114,70 @@ export function createInteractivePrompts(
 /** Backwards-compatible name for the executable's interactive prompt adapter. */
 export function createConsolePrompts(): AnalyzePrompts {
   return createInteractivePrompts();
+}
+
+/**
+ * Adapts the `edit` command's injected prompt contract to Inquirer's
+ * concrete terminal prompts, mirroring `createInteractivePrompts`.
+ */
+export function createEditPrompts(dependencies: InteractivePromptDependencies = defaultDependencies): EditPrompts {
+  return {
+    async requestSite(current): Promise<string> {
+      const site = await dependencies.input({
+        message: 'Site:',
+        default: current,
+        validate: required('A site name is required.'),
+      });
+      return site.trim();
+    },
+    async requestProfile(profiles, current): Promise<string> {
+      if (profiles.length === 0) {
+        return requiredProfile(dependencies, current);
+      }
+      const selected = await dependencies.select<ProfileSelection>({
+        message: 'Fleet profile:',
+        choices: [
+          ...profiles.map((profile) => ({
+            name: profile.name,
+            value: { kind: 'existing' as const, name: profile.name },
+          })),
+          { name: 'Create a new fleet profile', value: { kind: 'create' as const } },
+        ],
+      });
+      return selected.kind === 'create' ? requiredProfile(dependencies, current) : selected.name;
+    },
+    async requestNotes(current): Promise<string | null> {
+      const notes = await dependencies.input({
+        message: 'Notes (optional):',
+        ...(current === null ? {} : { default: current }),
+      });
+      return notes.trim() || null;
+    },
+    async requestWindow(current): Promise<WindowEditChoice> {
+      const action = await dependencies.select({
+        message: `Confirmed window is ${current.start} to ${current.end}. Change it?`,
+        choices: [
+          { name: 'Keep the current window', value: 'keep' },
+          { name: 'Adjust the window', value: 'adjust' },
+        ],
+      });
+      if (action !== 'adjust') {
+        return { action: 'keep' };
+      }
+      const start = await dependencies.input({
+        message: 'Adjusted start (ISO timestamp):',
+        default: current.start,
+        validate: required('An adjusted start timestamp is required.'),
+      });
+      const end = await dependencies.input({
+        message: 'Adjusted end (ISO timestamp):',
+        default: current.end,
+        validate: required('An adjusted end timestamp is required.'),
+      });
+      return { action: 'adjust', start: start.trim(), end: end.trim() };
+    },
+    confirmSave: async (pending) => dependencies.confirm({ message: `Save changes to run ${pending.id}?`, default: false }),
+  };
 }
 
 async function requiredProfile(dependencies: InteractivePromptDependencies, initial: string | undefined): Promise<string> {

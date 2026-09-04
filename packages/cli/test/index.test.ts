@@ -19,6 +19,28 @@ describe('runCli', () => {
       runCli(['analyze'], { execute: async () => ({ status: 'fatal', reason: 'logs' }) }),
     ).resolves.toBe(1);
   });
+
+  it('returns a nonzero exit code when injected recalculate execution reports a fatal result', async () => {
+    await expect(
+      runCli(['recalculate', '--all'], {
+        executeRecalculate: async () => ({ status: 'fatal', reason: 'missing-target' }),
+      }),
+    ).resolves.toBe(1);
+  });
+
+  it('returns zero when injected recalculate execution reports per-run outcomes', async () => {
+    await expect(
+      runCli(['recalculate', 'run-1'], {
+        executeRecalculate: async () => ({ status: 'ok', outcomes: [{ id: 'run-1', status: 'recalculated' }] }),
+      }),
+    ).resolves.toBe(0);
+  });
+
+  it('returns a nonzero exit code when injected edit execution reports a fatal result', async () => {
+    await expect(
+      runCli(['edit', 'run-1'], { executeEdit: async () => ({ status: 'fatal', reason: 'not-found' }) }),
+    ).resolves.toBe(1);
+  });
 });
 
 describe('createProgram', () => {
@@ -48,6 +70,49 @@ describe('createProgram', () => {
     await expect(program.parseAsync(['node', 'sitbench', '--help'], { from: 'node' })).rejects.toMatchObject({ exitCode: 0 });
     expect(output.join('')).toContain('Usage: sitbench [options] [command]');
     expect(output.join('')).toContain('analyze [options]');
+    expect(output.join('')).toContain('recalculate [options]');
+    expect(output.join('')).toContain('edit [options]');
+  });
+
+  it('executes exactly the planned recalculate options through an injected runner', async () => {
+    let executed: unknown;
+    const program = createProgram({
+      executeRecalculate: async (arguments_) => {
+        executed = arguments_;
+        return { status: 'ok', outcomes: [] };
+      },
+    });
+    program.exitOverride();
+
+    await program.parseAsync(['node', 'sitbench', 'recalculate', 'run-1', '--archive', '/archive'], { from: 'node' });
+    expect(executed).toEqual({ runId: 'run-1', archive: '/archive' });
+
+    await program.parseAsync(['node', 'sitbench', 'recalculate', '--all', '--archive', '/archive'], { from: 'node' });
+    expect(executed).toEqual({ all: true, archive: '/archive' });
+  });
+
+  it('executes exactly the planned edit options through an injected runner', async () => {
+    let executed: unknown;
+    const program = createProgram({
+      executeEdit: async (arguments_) => {
+        executed = arguments_;
+        return { status: 'updated', id: 'run-1' };
+      },
+    });
+    program.exitOverride();
+
+    await program.parseAsync(['node', 'sitbench', 'edit', 'run-1', '--archive', '/archive'], { from: 'node' });
+    expect(executed).toEqual({ runId: 'run-1', archive: '/archive' });
+  });
+
+  it('returns a Commander missing-argument error when edit is invoked without a run id', async () => {
+    const program = createProgram({ executeEdit: async () => ({ status: 'cancelled' }) });
+    program.exitOverride();
+
+    await expect(program.parseAsync(['node', 'sitbench', 'edit'], { from: 'node' })).rejects.toMatchObject({
+      code: 'commander.missingArgument',
+      exitCode: 1,
+    });
   });
 
   it.each([

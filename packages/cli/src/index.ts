@@ -3,15 +3,21 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command, CommanderError } from 'commander';
 import { runAnalyze, type AnalyzeArguments, type AnalyzeResult } from './analyze-command.js';
-import { createConsolePrompts } from './ui.js';
+import { runEdit, type EditArguments, type EditResult } from './edit-command.js';
+import { runRecalculate, type RecalculateArguments, type RecalculateResult } from './recalculate-command.js';
+import { createConsolePrompts, createEditPrompts } from './ui.js';
 
 export interface ProgramDependencies {
   execute?: (arguments_: AnalyzeArguments) => Promise<AnalyzeResult>;
+  executeRecalculate?: (arguments_: RecalculateArguments) => Promise<RecalculateResult>;
+  executeEdit?: (arguments_: EditArguments) => Promise<EditResult>;
 }
 
 /** Builds the process-independent Commander program for the sitbench executable. */
 export function createProgram(dependencies: ProgramDependencies = {}): Command {
   const execute = dependencies.execute ?? executeInteractively;
+  const executeRecalculate = dependencies.executeRecalculate ?? executeRecalculateInteractively;
+  const executeEdit = dependencies.executeEdit ?? executeEditInteractively;
   const program = new Command()
     .name('sitbench')
     .description('Analyze EVE Online game logs into sitbench runs.')
@@ -29,23 +35,63 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
       await execute(options);
     });
 
+  program
+    .command('recalculate')
+    .description("recalculate a run's (or every run's) metrics from archived events")
+    .argument('[run-id]', 'run id to recalculate')
+    .option('--all', 'recalculate every archived run')
+    .option('--archive <path>', 'sitbench archive directory')
+    .action(async (runId: string | undefined, options: { all?: boolean; archive?: string }) => {
+      await executeRecalculate({
+        ...(runId !== undefined ? { runId } : {}),
+        ...(options.all !== undefined ? { all: options.all } : {}),
+        ...(options.archive !== undefined ? { archive: options.archive } : {}),
+      });
+    });
+
+  program
+    .command('edit')
+    .description("interactively edit a run's metadata or confirmed window")
+    .argument('<run-id>', 'run id to edit')
+    .option('--archive <path>', 'sitbench archive directory')
+    .action(async (runId: string, options: { archive?: string }) => {
+      await executeEdit({
+        runId,
+        ...(options.archive !== undefined ? { archive: options.archive } : {}),
+      });
+    });
+
   return program;
 }
 
 /** Runs Commander without mutating process exit state, for executable and test callers. */
 export async function runCli(argv: string[], dependencies: ProgramDependencies = {}): Promise<number> {
   let analysisResult: AnalyzeResult | undefined;
+  let recalculateResult: RecalculateResult | undefined;
+  let editResult: EditResult | undefined;
   const execute = dependencies.execute ?? executeInteractively;
+  const executeRecalculate = dependencies.executeRecalculate ?? executeRecalculateInteractively;
+  const executeEdit = dependencies.executeEdit ?? executeEditInteractively;
   const program = createProgram({
     execute: async (arguments_) => {
       analysisResult = await execute(arguments_);
       return analysisResult;
     },
+    executeRecalculate: async (arguments_) => {
+      recalculateResult = await executeRecalculate(arguments_);
+      return recalculateResult;
+    },
+    executeEdit: async (arguments_) => {
+      editResult = await executeEdit(arguments_);
+      return editResult;
+    },
   });
 
   try {
     await program.parseAsync(argv, { from: 'user' });
-    return analysisResult?.status === 'fatal' ? 1 : 0;
+    const isFatal =
+      analysisResult?.status === 'fatal' || recalculateResult?.status === 'fatal' || editResult?.status === 'fatal';
+    return isFatal ? 1 : 0;
   } catch (error) {
     if (error instanceof CommanderError) {
       return error.exitCode;
@@ -66,6 +112,14 @@ export function isDirectEntryPoint(moduleUrl: string, argvPath: string | undefin
 
 async function executeInteractively(arguments_: AnalyzeArguments): Promise<AnalyzeResult> {
   return runAnalyze(arguments_, { prompts: createConsolePrompts() });
+}
+
+async function executeRecalculateInteractively(arguments_: RecalculateArguments): Promise<RecalculateResult> {
+  return runRecalculate(arguments_, {});
+}
+
+async function executeEditInteractively(arguments_: EditArguments): Promise<EditResult> {
+  return runEdit(arguments_, { prompts: createEditPrompts() });
 }
 
 if (isDirectEntryPoint(import.meta.url, process.argv[1])) {

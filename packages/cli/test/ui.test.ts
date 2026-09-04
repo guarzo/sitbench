@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createInteractivePrompts } from '../src/ui.js';
+import { createEditPrompts, createInteractivePrompts } from '../src/ui.js';
 
 const candidate = {
   start: '2026-09-03T04:04:00.000Z',
@@ -73,5 +73,80 @@ describe('createInteractivePrompts', () => {
     await expect(prompts.requestNotes()).resolves.toBe('clean run');
     await expect(prompts.confirmSave({} as never)).resolves.toBe(true);
     expect(validationResults).toEqual(['A site name is required.', true]);
+  });
+});
+
+describe('createEditPrompts', () => {
+  const currentWindow = {
+    start: '2026-09-03T04:51:14.000Z',
+    end: '2026-09-03T04:53:14.000Z',
+    source: 'first-and-last-outgoing-npc-damage',
+    manuallyAdjusted: false,
+  };
+
+  it('defaults site, profile-create, and notes inputs to the run current values', async () => {
+    const prompts = createEditPrompts({
+      select: async () => ({ kind: 'create' }) as never,
+      input: async (configuration) => configuration.default ?? '',
+      confirm: async () => true,
+    });
+
+    await expect(prompts.requestSite('Core Bastion')).resolves.toBe('Core Bastion');
+    await expect(
+      prompts.requestProfile([{ id: 'solo', name: 'Solo Vindicator' }], '8 Kikis + 2 Deacons'),
+    ).resolves.toBe('8 Kikis + 2 Deacons');
+    await expect(prompts.requestNotes('existing notes')).resolves.toBe('existing notes');
+  });
+
+  it('returns keep when the window select answer is not adjust, without prompting for new timestamps', async () => {
+    let inputCalls = 0;
+    const prompts = createEditPrompts({
+      select: async () => 'keep',
+      input: async () => {
+        inputCalls += 1;
+        return '';
+      },
+      confirm: async () => true,
+    });
+
+    await expect(prompts.requestWindow(currentWindow)).resolves.toEqual({ action: 'keep' });
+    expect(inputCalls).toBe(0);
+  });
+
+  it('returns an adjusted window defaulted to the current bounds and validated as required', async () => {
+    const validationResults: Array<string | boolean | undefined> = [];
+    const prompts = createEditPrompts({
+      select: async () => 'adjust',
+      input: async (configuration) => {
+        validationResults.push(await configuration.validate?.(''));
+        return configuration.default ?? '';
+      },
+      confirm: async () => true,
+    });
+
+    await expect(prompts.requestWindow(currentWindow)).resolves.toEqual({
+      action: 'adjust',
+      start: currentWindow.start,
+      end: currentWindow.end,
+    });
+    expect(validationResults).toEqual([
+      'An adjusted start timestamp is required.',
+      'An adjusted end timestamp is required.',
+    ]);
+  });
+
+  it('confirms save using the pending run id', async () => {
+    let confirmedMessage = '';
+    const prompts = createEditPrompts({
+      select: async () => 'keep',
+      input: async () => '',
+      confirm: async (configuration) => {
+        confirmedMessage = configuration.message;
+        return true;
+      },
+    });
+
+    await expect(prompts.confirmSave({ id: 'run-1' } as never)).resolves.toBe(true);
+    expect(confirmedMessage).toBe('Save changes to run run-1?');
   });
 });
