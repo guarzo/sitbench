@@ -25,6 +25,15 @@ const OBVIOUS_STRUCTURE_PATTERNS = [
   /\bInfrastructure Hub\b/i,
 ];
 
+/**
+ * Names that can currently be confirmed as NPCs. This list is deliberately
+ * limited to the Sleeper-family prefixes that synthetic fixtures and the
+ * design spec actually cover; every other PvE target name stays 'ambiguous'
+ * and is excluded from qualifying episode detection rather than guessed at.
+ * Do not extend this list without anonymized real gamelog evidence for the
+ * added names -- a wrong confirmation silently changes run windows and
+ * metrics, while an ambiguous classification is reported to the user.
+ */
 const KNOWN_NPC_PATTERNS = [/^Sleepless\b/, /^Awakened\b/, /^Emergent\b/];
 
 export type TargetClassification = DamageDealt['targetClassification'];

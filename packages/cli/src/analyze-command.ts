@@ -100,16 +100,30 @@ export async function runAnalyze(
   const events = normalized
     .flatMap((result) => result.events)
     .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sourceFile.localeCompare(right.sourceFile) || left.sourceLine - right.sourceLine);
+  const unparsedCombatLines = normalized.reduce((sum, result) => sum + result.counts.unparsedCombatLines, 0);
+  const ambiguousEventsExcluded = normalized.reduce((sum, result) => sum + result.counts.ambiguousEventsExcluded, 0);
   const candidates = detectEpisodes(events, { episodeThresholdSeconds: config.episodeThresholdSeconds });
   if (candidates.length === 0) {
-    return fatal(write, 'No outgoing NPC damage was found in the inspected logs.', 'no-outgoing-npc-damage');
+    // The no-candidate path is the one place where the classifier's
+    // deliberately narrow NPC confidence is most likely to be mistaken for
+    // "the fleet dealt no damage", so the same coverage counts the candidate
+    // preview shows are reported here too, together with an explicit
+    // unsupported-classification note whenever ambiguous targets were seen.
+    displayCoverage(write, normalized.length, unparsedCombatLines, ambiguousEventsExcluded);
+    if (ambiguousEventsExcluded > 0) {
+      write(
+        'Note: ambiguous events are outgoing damage whose target could not be confirmed as an NPC. They may indicate target names not yet supported by NPC classification rather than meaning no damage was dealt.',
+      );
+    }
+    return fatal(write, 'No confirmed outgoing NPC damage was found in the inspected logs.', 'no-outgoing-npc-damage');
   }
 
   let candidate = candidates.at(-1);
   if (candidate === undefined) {
     return fatal(write, 'No candidate episode was available.', 'no-candidate');
   }
-  displayCandidate(write, candidate, candidates, normalized.length, normalized.reduce((sum, result) => sum + result.counts.unparsedCombatLines, 0), normalized.reduce((sum, result) => sum + result.counts.ambiguousEventsExcluded, 0));
+  displayCandidate(write, candidate, candidates);
+  displayCoverage(write, normalized.length, unparsedCombatLines, ambiguousEventsExcluded);
 
   const choice = await dependencies.prompts.confirmCandidate({ candidate, candidates });
   if (choice.action === 'cancel') {
@@ -169,7 +183,7 @@ export async function runAnalyze(
     calculation: calculated.calculation,
     metrics: calculated.metrics,
     characterMetrics: calculated.characterMetrics,
-    coverage: coverageFor(runEvents, logFiles.length, normalized.reduce((sum, result) => sum + result.counts.unparsedCombatLines, 0), normalized.reduce((sum, result) => sum + result.counts.ambiguousEventsExcluded, 0)),
+    coverage: coverageFor(runEvents, normalized.length, unparsedCombatLines, ambiguousEventsExcluded),
     notes: (await dependencies.prompts.requestNotes())?.trim() || null,
     fingerprint: fingerprintRun(runEvents, window),
     createdAt: now,
@@ -289,10 +303,16 @@ function coverageFor(events: NormalizedEvent[], logFiles: number, unparsedCombat
   };
 }
 
-function displayCandidate(write: (line: string) => void, candidate: CandidateEpisode, candidates: CandidateEpisode[], logFiles: number, unparsed: number, ambiguous: number): void {
+function displayCandidate(write: (line: string) => void, candidate: CandidateEpisode, candidates: CandidateEpisode[]): void {
   write(`Newest candidate: ${candidate.start} to ${candidate.end} (${candidate.qualifyingEventCount} qualifying events).`);
   write(`Adjacent activity: previous ${candidate.previousQualifyingActivityAt ?? 'none'}; next ${candidate.nextQualifyingActivityAt ?? 'none'}; ${candidates.length} candidate window(s).`);
-  write(`Coverage: ${logFiles} log file(s), ${unparsed} unparsed combat line(s), ${ambiguous} ambiguous event(s) excluded from qualifying analysis.`);
+}
+
+/** Reports the same inspected-input counts on both the candidate and no-candidate paths. */
+function displayCoverage(write: (line: string) => void, logFiles: number, unparsed: number, ambiguous: number): void {
+  write(
+    `Coverage: ${logFiles} log file(s) inspected, ${unparsed} unparsed combat line(s), ${ambiguous} ambiguous event(s) excluded from qualifying analysis.`,
+  );
 }
 
 function displayPreview(write: (line: string) => void, summary: RunSummary, comparison: ReturnType<typeof compareMatchingRuns>): void {

@@ -240,6 +240,37 @@ describe('runAnalyze', () => {
     expect(await new Archive(archiveDir).listRuns()).toEqual([]);
   });
 
+  it('reports coverage diagnostics and unsupported-NPC guidance when no candidate episode is found', async () => {
+    // Every outgoing damage line here targets a name the conservative
+    // classifier cannot confirm as an NPC, so it is preserved as
+    // 'ambiguous' and never qualifies for episode detection. The
+    // no-candidate path must say so explicitly instead of implying the
+    // fleet dealt no damage.
+    await writeFile(
+      path.join(logsDir, 'combat.txt'),
+      gameLog('Dah Nee', [
+        '[ 2026.09.03 04:00:00 ] (combat) 100 from Dah Nee[Example] - Heavy Entropic Disintegrator II - Hits Unlisted Rogue Drone',
+        '[ 2026.09.03 04:00:20 ] (combat) 120 from Dah Nee[Example] - Heavy Entropic Disintegrator II - Hits Unlisted Rogue Drone',
+        '[ 2026.09.03 04:00:30 ] (combat) something entirely unrecognized',
+      ]),
+      'utf8',
+    );
+    const output: string[] = [];
+
+    const result = await runAnalyze(
+      { logs: logsDir, archive: archiveDir },
+      { prompts: newestWindowPrompts, clock: fixedClock, write: (line) => output.push(line) },
+    );
+
+    expect(result).toMatchObject({ status: 'fatal', reason: 'no-outgoing-npc-damage' });
+    expect(await new Archive(archiveDir).listRuns()).toEqual([]);
+    const text = output.join('\n');
+    expect(text).toContain('Coverage: 1 log file(s) inspected');
+    expect(text).toContain('1 unparsed combat line(s)');
+    expect(text).toContain('2 ambiguous event(s) excluded from qualifying analysis');
+    expect(text).toContain('not yet supported by NPC classification');
+  });
+
   it('does not add another run when the confirmed fingerprint already exists', async () => {
     await writeCandidateLog();
     const first = await runAnalyze(

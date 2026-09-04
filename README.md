@@ -78,6 +78,8 @@ Use `--include-characters` and/or `--include-notes` only after reviewing the out
 
 Synthetic end-to-end verification uses representative EVE line shapes and temporary copied fixture files. It covers analysis, archiving, duplicate rejection, recalculation, local dashboard data, and the default privacy-safe public export. It does not establish complete parser coverage for live client logs.
 
+NPC target confidence is deliberately narrow. Sitbench only confirms a target as an NPC when its name matches the currently supported Sleeper-family patterns (`Sleepless…`, `Awakened…`, `Emergent…`), and it only confirms a target as non-site when the name matches the known player-owned deployable and structure exclusions. Every other target name is recorded as `ambiguous` and is excluded from qualifying episode detection and metrics, so PvE content outside those supported patterns can produce "no confirmed outgoing NPC damage" even though damage was dealt. `sitbench analyze` reports the ambiguous count on both the candidate and no-candidate paths so this is visible rather than silent. Expanding classification beyond the supported patterns requires anonymized real gamelog fixtures as evidence; no NPC names are added speculatively.
+
 Manual real-log smoke test: outstanding
 
 Real-log parser coverage: outstanding
