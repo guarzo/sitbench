@@ -46,6 +46,7 @@ export interface AnalyzeDependencies {
   write?: (line: string) => void;
   discoverGameLogDirs?: () => Promise<string[]>;
   readRecentLogFiles?: (directory: string) => Promise<LogFile[]>;
+  createArchive?: (directory: string) => Archive;
   rebuildCatalog?: (archive: Archive) => Promise<void>;
 }
 
@@ -137,7 +138,7 @@ export async function runAnalyze(
     return fatal(write, 'A non-empty site name is required.', 'site');
   }
 
-  const archive = new Archive(archiveDirectory);
+  const archive = (dependencies.createArchive ?? ((directory) => new Archive(directory)))(archiveDirectory);
   let profiles: FleetProfile[];
   try {
     profiles = await archive.loadProfiles();
@@ -213,9 +214,7 @@ export async function runAnalyze(
 
   try {
     await archive.upsertProfile(profileName);
-    await (dependencies.rebuildCatalog ?? (async (currentArchive) => {
-      await currentArchive.rebuildCatalog();
-    }))(archive);
+    await (dependencies.rebuildCatalog ?? rebuildCatalogNoop)(archive);
     await saveConfig(archiveDirectory, {
       gameLogDir: logDirectory,
       episodeThresholdSeconds: config.episodeThresholdSeconds,
@@ -228,6 +227,11 @@ export async function runAnalyze(
 
   write(`Saved run ${summary.id}.`);
   return { status: 'saved', id: summary.id };
+}
+
+async function rebuildCatalogNoop(): Promise<void> {
+  // Archive.saveRun already rebuilds catalog.json. Task 7 will replace this
+  // extension point with generated dashboard-data export.
 }
 
 async function readRecentLogFiles(directory: string): Promise<LogFile[]> {

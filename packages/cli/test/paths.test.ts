@@ -1,8 +1,8 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { discoverGameLogDirs, loadConfig, resolveGameLogDir } from '../src/paths.js';
+import { discoverGameLogDirs, loadConfig, resolveGameLogDir, saveConfig } from '../src/paths.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -50,6 +50,22 @@ describe('loadConfig', () => {
       episodeThresholdSeconds: 180,
       activeCombatGapSeconds: 30,
     });
+  });
+});
+
+describe('saveConfig', () => {
+  it('creates a deferred archive directory before writing config', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'sitbench-config-'));
+    temporaryDirectories.push(root);
+    const archiveDir = path.join(root, 'deferred', 'archive');
+
+    await saveConfig(archiveDir, {
+      gameLogDir: '/logs',
+      episodeThresholdSeconds: 180,
+      activeCombatGapSeconds: 30,
+    });
+
+    await expect(readFile(path.join(archiveDir, 'config.json'), 'utf8')).resolves.toContain('"gameLogDir": "/logs"');
   });
 });
 

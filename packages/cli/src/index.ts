@@ -1,62 +1,67 @@
 #!/usr/bin/env node
-import { pathToFileURL } from 'node:url';
-import { runAnalyze, type AnalyzeArguments } from './analyze-command.js';
+import { Command, CommanderError } from 'commander';
+import { runAnalyze, type AnalyzeArguments, type AnalyzeResult } from './analyze-command.js';
 import { createConsolePrompts } from './ui.js';
 
-const USAGE = 'Usage: sitbench analyze [--site <name>] [--profile <name>] [--logs <path>] [--archive <path>]';
+export interface ProgramDependencies {
+  execute?: (arguments_: AnalyzeArguments) => Promise<AnalyzeResult>;
+}
 
-/** Parses the executable boundary's intentionally small analyze-only argument surface. */
-export function parseAnalyzeArguments(argv: string[]): AnalyzeArguments {
-  if (argv[0] !== 'analyze') {
-    throw new Error(USAGE);
-  }
+/** Builds the process-independent Commander program for the sitbench executable. */
+export function createProgram(dependencies: ProgramDependencies = {}): Command {
+  const execute = dependencies.execute ?? executeInteractively;
+  const program = new Command()
+    .name('sitbench')
+    .description('Analyze EVE Online game logs into sitbench runs.')
+    .version('0.1.0')
+    .exitOverride();
 
-  const result: AnalyzeArguments = {};
-  for (let index = 1; index < argv.length; index += 2) {
-    const flag = argv[index];
-    const value = argv[index + 1];
-    if (value === undefined) {
-      throw new Error(`${USAGE}\nMissing value for ${flag ?? 'option'}.`);
+  program
+    .command('analyze')
+    .description('analyze recent game logs into one confirmed run')
+    .option('--site <name>', 'site name')
+    .option('--profile <name>', 'fleet profile name')
+    .option('--logs <path>', 'EVE Gamelogs directory')
+    .option('--archive <path>', 'sitbench archive directory')
+    .action(async (options: AnalyzeArguments) => {
+      await execute(options);
+    });
+
+  return program;
+}
+
+/** Runs Commander without mutating process exit state, for executable and test callers. */
+export async function runCli(argv: string[], dependencies: ProgramDependencies = {}): Promise<number> {
+  let analysisResult: AnalyzeResult | undefined;
+  const execute = dependencies.execute ?? executeInteractively;
+  const program = createProgram({
+    execute: async (arguments_) => {
+      analysisResult = await execute(arguments_);
+      return analysisResult;
+    },
+  });
+
+  try {
+    await program.parseAsync(argv, { from: 'user' });
+    return analysisResult?.status === 'fatal' ? 1 : 0;
+  } catch (error) {
+    if (error instanceof CommanderError) {
+      return error.exitCode;
     }
-    switch (flag) {
-      case '--site':
-        result.site = value;
-        break;
-      case '--profile':
-        result.profile = value;
-        break;
-      case '--logs':
-        result.logs = value;
-        break;
-      case '--archive':
-        result.archive = value;
-        break;
-      default:
-        throw new Error(`${USAGE}\nUnknown option ${flag}.`);
-    }
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
   }
-  return result;
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
-  let arguments_: AnalyzeArguments;
-  try {
-    arguments_ = parseAnalyzeArguments(argv);
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
-    return 2;
-  }
-
-  const consolePrompts = createConsolePrompts();
-  try {
-    const result = await runAnalyze(arguments_, { prompts: consolePrompts.prompts });
-    return result.status === 'fatal' ? 1 : 0;
-  } finally {
-    consolePrompts.close();
-  }
+  return runCli(argv);
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+async function executeInteractively(arguments_: AnalyzeArguments): Promise<AnalyzeResult> {
+  return runAnalyze(arguments_, { prompts: createConsolePrompts() });
+}
+
+if (import.meta.main) {
   void main().then((exitCode) => {
     process.exitCode = exitCode;
   });

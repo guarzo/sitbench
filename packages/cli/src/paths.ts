@@ -1,4 +1,4 @@
-import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import * as path from 'node:path';
 
@@ -91,6 +91,7 @@ export async function loadConfig(archiveDir: string): Promise<AnalyzeConfig> {
 export async function saveConfig(archiveDir: string, config: AnalyzeConfig): Promise<void> {
   assertPositiveFinite('episodeThresholdSeconds', config.episodeThresholdSeconds);
   assertPositiveFinite('activeCombatGapSeconds', config.activeCombatGapSeconds);
+  await mkdir(archiveDir, { recursive: true });
   await writeFile(path.join(archiveDir, 'config.json'), `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 }
 

@@ -93,6 +93,21 @@ async function saveMatchingHistoricalRun(): Promise<void> {
   await archive.saveRun(historical, []);
 }
 
+class CountingArchive extends Archive {
+  saves = 0;
+  catalogRebuilds = 0;
+
+  override async saveRun(summary: RunSummary, events: Parameters<Archive['saveRun']>[1]): Promise<RunSummary> {
+    this.saves += 1;
+    return super.saveRun(summary, events);
+  }
+
+  override async rebuildCatalog() {
+    this.catalogRebuilds += 1;
+    return super.rebuildCatalog();
+  }
+}
+
 describe('runAnalyze', () => {
   it('saves the newest candidate with supplied metadata and reports a matching previous run', async () => {
     await writeCandidateLog();
@@ -133,6 +148,41 @@ describe('runAnalyze', () => {
     if (result.status === 'saved') {
       expect(result.id).toMatch(RUN_ID_PATTERN);
     }
+  });
+
+  it('does not trigger a second catalog rebuild by default, but runs an injected post-save hook', async () => {
+    await writeCandidateLog();
+    const defaultArchive = new CountingArchive(archiveDir);
+
+    const defaultResult = await runAnalyze(
+      { logs: logsDir, archive: archiveDir },
+      { prompts: newestWindowPrompts, clock: fixedClock, write: () => undefined, createArchive: () => defaultArchive },
+    );
+
+    expect(defaultResult.status).toBe('saved');
+    expect(defaultArchive.saves).toBe(1);
+    expect(defaultArchive.catalogRebuilds).toBe(0);
+
+    const hookedArchiveDir = path.join(root, 'hooked-archive');
+    const hookedArchive = new CountingArchive(hookedArchiveDir);
+    let injectedHookCalls = 0;
+    const hookedResult = await runAnalyze(
+      { logs: logsDir, archive: hookedArchiveDir },
+      {
+        prompts: newestWindowPrompts,
+        clock: fixedClock,
+        write: () => undefined,
+        createArchive: () => hookedArchive,
+        rebuildCatalog: async () => {
+          injectedHookCalls += 1;
+        },
+      },
+    );
+
+    expect(hookedResult.status).toBe('saved');
+    expect(hookedArchive.saves).toBe(1);
+    expect(hookedArchive.catalogRebuilds).toBe(0);
+    expect(injectedHookCalls).toBe(1);
   });
 
   it('does not report previous-run data when the archive has no matching history', async () => {
