@@ -1,5 +1,17 @@
+import { relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { createProgram, runCli } from '../src/index.js';
+import { createProgram, isDirectEntryPoint, runCli } from '../src/index.js';
+
+describe('isDirectEntryPoint', () => {
+  it('matches a resolved argv entry path to its module URL, but not a different path', () => {
+    const modulePath = fileURLToPath(import.meta.url);
+    const equivalentArgvPath = relative(process.cwd(), modulePath);
+
+    expect(isDirectEntryPoint(import.meta.url, equivalentArgvPath)).toBe(true);
+    expect(isDirectEntryPoint(import.meta.url, `${modulePath}.other`)).toBe(false);
+  });
+});
 
 describe('runCli', () => {
   it('returns a nonzero exit code when injected analyze execution reports a fatal result', async () => {

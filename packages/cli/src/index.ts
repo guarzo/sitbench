@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Command, CommanderError } from 'commander';
 import { runAnalyze, type AnalyzeArguments, type AnalyzeResult } from './analyze-command.js';
 import { createConsolePrompts } from './ui.js';
@@ -57,11 +59,16 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   return runCli(argv);
 }
 
+/** Returns whether a module URL is the resolved path invoked by Node. */
+export function isDirectEntryPoint(moduleUrl: string, argvPath: string | undefined): boolean {
+  return argvPath !== undefined && fileURLToPath(moduleUrl) === resolve(argvPath);
+}
+
 async function executeInteractively(arguments_: AnalyzeArguments): Promise<AnalyzeResult> {
   return runAnalyze(arguments_, { prompts: createConsolePrompts() });
 }
 
-if (import.meta.main) {
+if (isDirectEntryPoint(import.meta.url, process.argv[1])) {
   void main().then((exitCode) => {
     process.exitCode = exitCode;
   });
