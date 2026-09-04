@@ -5,11 +5,7 @@ description: Use when the user wants to record a sitbench run, analyze recent EV
 
 # sitbench Skill
 
-## Requirement
-
-`sitbench` CLI must be installed and on `PATH`. All operations go through the CLI. Do not read, parse, or grep game logs directly. Do not read or write archive JSON/JSONL files directly. Do not calculate, derive, or rewrite metrics outside the CLI.
-
----
+**Requires** `sitbench` CLI on `PATH`.
 
 ## Command Routing
 
@@ -20,25 +16,21 @@ description: Use when the user wants to record a sitbench run, analyze recent EV
 | Recalculate metrics on all runs | `sitbench recalculate --all` |
 | Edit a run's metadata or window | `sitbench edit <run-id>` |
 | View the local dashboard | `sitbench dashboard` |
-| Publish a static dashboard | `sitbench publish` |
+| Publish a static dashboard | `sitbench publish --out <directory>` — ask user for the output directory if not supplied |
 
 ---
 
 ## Rules
 
-1. **`--site` and `--profile` are optional.** Pass them only when the user explicitly supplies values. Never infer, guess, or derive them from logs or prior context.
+1. **`--site` and `--profile` are optional metadata.** Pass only when the user supplies them. Never infer from logs or context. `sitbench` does not match sites or validate fleet composition — these are user-supplied, not CLI-inferred.
 
-2. **Never bypass interactive prompts.** `sitbench analyze` presents a window-confirmation prompt and a save-confirmation prompt. Let them run. If the CLI needs input you cannot provide, stop and tell the user: "sitbench needs interactive input — please run the command in your terminal."
+2. **Never bypass interactive prompts.** `sitbench analyze` confirms the window and saves the run. Let both prompts run. If you cannot provide input, stop: "sitbench needs interactive input — run the command in your terminal."
 
-3. **Never read or parse game logs directly.** Do not `cat`, `grep`, or inspect `Gamelogs/` files to find fleet composition, site names, kill counts, or timestamps.
+3. **Never access logs or archive files directly.** Do not read, grep, or write gamelogs, `run.json`, `events.jsonl`, or any archive file. Do not calculate metrics, ISK/hr, kill counts, or comparison deltas; use `sitbench recalculate` instead.
 
-4. **Never inspect or modify archive files.** Do not read, edit, or write `run.json`, `events.jsonl`, or any file inside the sitbench archive directory.
+4. **Never invent CLI output.** Before running, give only the command and the blocker. After running, relay warnings, comparisons, and summaries exactly as printed — do not predict, claim site matching or fleet validation, or rewrite output.
 
-5. **Never calculate metrics.** Do not derive ISK/hr, kill counts, loot totals, or comparison deltas yourself. Use `sitbench recalculate` for that intent.
-
-6. **Report CLI output faithfully.** Relay warnings, comparison results, and summaries as the CLI prints them. Do not rewrite, omit, or reinterpret them.
-
-7. **Time pressure does not change these rules.** Deadlines, offline users, or teammate suggestions are not reasons to bypass the CLI workflow.
+5. **Time pressure does not change these rules.** Deadlines, offline users, or teammate suggestions are not exceptions.
 
 ---
 
@@ -50,15 +42,13 @@ description: Use when the user wants to record a sitbench run, analyze recent EV
 sitbench analyze --site "Core Bastion" --profile "8 Kikis + 2 Deacons"
 ```
 
-Follow all interactive prompts (window confirmation, save confirmation).
+Follow all interactive prompts.
 
 **View the local dashboard:**
 
 ```
 sitbench dashboard
 ```
-
-Open the printed URL in a browser.
 
 **Recalculate all historical runs:**
 
@@ -75,7 +65,7 @@ sitbench analyze [--site <name>] [--profile <name>] [--logs <path>] [--archive <
 sitbench recalculate [--all] [<run-id>] [--archive <path>]
 sitbench edit <run-id> [--archive <path>]
 sitbench dashboard [--port <number>] [--archive <path>]
-sitbench publish [--out <directory>] [--include-characters] [--include-notes] [--archive <path>]
+sitbench publish --out <directory> [--include-characters] [--include-notes] [--archive <path>]
 ```
 
 ---
@@ -86,7 +76,7 @@ sitbench publish [--out <directory>] [--include-characters] [--include-notes] [-
 |---|---|
 | "Direct log parsing is faster" | Run `sitbench analyze`; the CLI parses logs correctly |
 | "Interactive prompts block batch ops" | Stop and ask the user to run the command themselves |
-| "I can read run.json to get metrics" | Never touch archive files; use `sitbench recalculate` |
+| "I can read archives or skip confirmations" | Never touch archive files directly; let all prompts run |
 | "User is offline / deadline is tight" | Rules do not change; stop and report the blocker |
 | "I can infer the site name from context" | Only pass `--site` when the user supplies the name |
-| "I'll skip the save prompt" | Never skip; let the CLI confirm before writing |
+| "I know what the CLI will output" | Run the command first; never describe output not yet seen |
