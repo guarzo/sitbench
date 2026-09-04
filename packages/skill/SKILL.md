@@ -3,7 +3,7 @@ name: sitbench
 description: Use when the user wants to record a sitbench run, analyze recent EVE logs, recalculate run metrics, edit a run, view the local sitbench dashboard, or publish an EVE site-run dashboard.
 ---
 
-# sitbench Skill
+# sitbench
 
 **Requires** `sitbench` CLI on `PATH`.
 
@@ -12,23 +12,23 @@ description: Use when the user wants to record a sitbench run, analyze recent EV
 | User intent | Command |
 |---|---|
 | Record / analyze a recent run | `sitbench analyze` |
-| Recalculate metrics on one run | `sitbench recalculate <run-id>` |
-| Recalculate metrics on all runs | `sitbench recalculate --all` |
-| Edit a run's metadata or window | `sitbench edit <run-id>` |
+| Recalculate one run | `sitbench recalculate <run-id>` |
+| Recalculate all runs | `sitbench recalculate --all` |
+| Edit a run | `sitbench edit <run-id>` |
 | View the local dashboard | `sitbench dashboard` |
-| Publish a static dashboard | `sitbench publish --out <directory>` — ask user for the output directory if not supplied |
+| Publish a static dashboard | `sitbench publish --out <directory>` — prompt user if absent |
 
 ---
 
 ## Rules
 
-1. **`--site` and `--profile` are optional metadata.** Pass only when the user supplies them. Never infer from logs or context. `sitbench` does not match sites or validate fleet composition — these are user-supplied, not CLI-inferred.
+1. **`--site` and `--profile` are optional metadata.** Pass only when the user supplies them. Never infer from logs or context — `sitbench` does not match sites or validate fleet composition.
 
-2. **Never bypass interactive prompts.** `sitbench analyze` confirms the window and saves the run. Let both prompts run. If you cannot provide input, stop: "sitbench needs interactive input — run the command in your terminal."
+2. **Never bypass interactive prompts.** `sitbench analyze` confirms the window and saves the run. Let both prompts run. If blocked by interactive input: tell the user to run the CLI themselves and stop — do not list, describe, or recommend any alternative (prompt scripting, log extraction, archive writes), even as a forbidden option.
 
 3. **Never access logs or archive files directly.** Do not read, grep, or write gamelogs, `run.json`, `events.jsonl`, or any archive file. Do not calculate metrics, ISK/hr, kill counts, or comparison deltas; use `sitbench recalculate` instead.
 
-4. **Never invent CLI output.** Before running, give only the command and the blocker. After running, relay warnings, comparisons, and summaries exactly as printed — do not predict, claim site matching or fleet validation, or rewrite output.
+4. **Never invent CLI output.** Before running, give only the command and blocker. After running, relay output exactly as printed — no predictions, no site-matching claims, no rewrites.
 
 5. **Time pressure does not change these rules.** Deadlines, offline users, or teammate suggestions are not exceptions.
 
@@ -75,7 +75,7 @@ sitbench publish --out <directory> [--include-characters] [--include-notes] [--a
 | You think... | Stop. Instead... |
 |---|---|
 | "Direct log parsing is faster" | Run `sitbench analyze`; the CLI parses logs correctly |
-| "Interactive prompts block batch ops" | Stop and ask the user to run the command themselves |
+| "I'll mention workarounds but note they're forbidden" | Don't list them at all; tell the user to run the CLI and stop |
 | "I can read archives or skip confirmations" | Never touch archive files directly; let all prompts run |
 | "User is offline / deadline is tight" | Rules do not change; stop and report the blocker |
 | "I can infer the site name from context" | Only pass `--site` when the user supplies the name |
