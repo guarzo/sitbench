@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { Archive } from '@sitbench/core';
+import { Archive, PublicDashboardDatasetSchema } from '@sitbench/core';
 import { runAnalyze, type AnalyzePrompts } from '../src/analyze-command.js';
 import { regenerateDashboardData } from '../src/dashboard-export.js';
 import { runPublish } from '../src/publish-command.js';
@@ -70,13 +70,22 @@ describe('Sitbench end-to-end workflow', () => {
     const archive = new Archive(archiveDir);
     const saved = await archive.loadRun(first.id);
     expect(saved).not.toBeNull();
-    expect(saved?.summary.metrics.elapsedSeconds).toBe(40);
-    expect(saved?.summary.metrics.fleetDamageDealt).toBe(1000);
-    expect(saved?.summary.characterMetrics.map((metric) => [metric.character, metric.damageDealt])).toEqual([
+    if (saved === null) throw new Error('Expected the saved run to be loadable from the archive.');
+
+    expect(saved.summary.metrics.elapsedSeconds).toBe(40);
+    expect(saved.summary.metrics.fleetDamageDealt).toBe(1000);
+    expect(saved.summary.characterMetrics.map((metric) => [metric.character, metric.damageDealt])).toEqual([
       ['Arc One', 300],
       ['Bolt Two', 700],
     ]);
-    const archivedEvents = (await readFile(path.join(archiveDir, 'runs', first.id, 'events.jsonl'), 'utf8'))
+
+    const runDir = path.join(archiveDir, 'runs', first.id);
+    const [runJsonBeforeDuplicate, eventsJsonlBeforeDuplicate, dashboardDataBeforeDuplicate] = await Promise.all([
+      readFile(path.join(runDir, 'run.json'), 'utf8'),
+      readFile(path.join(runDir, 'events.jsonl'), 'utf8'),
+      readFile(path.join(archiveDir, 'dashboard', 'data', 'runs.json'), 'utf8'),
+    ]);
+    const archivedEvents = eventsJsonlBeforeDuplicate
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line) as { observedBy: string; sourceFile: string; sourceLine: number; amount: number; raw: string });
@@ -88,7 +97,7 @@ describe('Sitbench end-to-end workflow', () => {
     ]);
     expect(archivedEvents.map((event) => event.raw)).toEqual([arcLines[1], boltLines[0], arcLines[2], boltLines[1]]);
 
-    const localDataset = JSON.parse(await readFile(path.join(archiveDir, 'dashboard', 'data', 'runs.json'), 'utf8')) as {
+    const localDataset = JSON.parse(dashboardDataBeforeDuplicate) as {
       mode: string;
       runs: Array<{ characterMetrics: Array<{ character: string; damageDealt: number }> }>;
     };
@@ -97,6 +106,23 @@ describe('Sitbench end-to-end workflow', () => {
       ['Arc One', 300],
       ['Bolt Two', 700],
     ]);
+
+    const originalSummary = {
+      metrics: saved.summary.metrics,
+      characterMetrics: saved.summary.characterMetrics,
+      participants: saved.summary.participants,
+      calculation: saved.summary.calculation,
+      schemaVersion: saved.summary.schemaVersion,
+      parserVersion: saved.summary.parserVersion,
+      id: saved.summary.id,
+      site: saved.summary.site,
+      fleetProfile: saved.summary.fleetProfile,
+      window: saved.summary.window,
+      coverage: saved.summary.coverage,
+      notes: saved.summary.notes,
+      fingerprint: saved.summary.fingerprint,
+      createdAt: saved.summary.createdAt,
+    };
 
     const duplicate = await runAnalyze(
       { logs: logsDir, archive: archiveDir },
@@ -109,25 +135,62 @@ describe('Sitbench end-to-end workflow', () => {
     );
     expect(duplicate).toMatchObject({ status: 'fatal', reason: 'duplicate' });
     expect(await archive.listRuns()).toHaveLength(1);
+    await expect(Promise.all([
+      readFile(path.join(runDir, 'run.json'), 'utf8'),
+      readFile(path.join(runDir, 'events.jsonl'), 'utf8'),
+      readFile(path.join(archiveDir, 'dashboard', 'data', 'runs.json'), 'utf8'),
+    ])).resolves.toEqual([runJsonBeforeDuplicate, eventsJsonlBeforeDuplicate, dashboardDataBeforeDuplicate]);
 
     expect(await runRecalculate(
       { all: true, archive: archiveDir },
       { write: () => undefined, rebuildCatalog: rebuildDashboard },
     )).toMatchObject({ status: 'ok', outcomes: [{ id: first.id, status: 'recalculated' }] });
     const recalculated = await archive.loadRun(first.id);
-    expect(recalculated?.summary.metrics.elapsedSeconds).toBe(40);
-    expect(recalculated?.summary.characterMetrics.map((metric) => [metric.character, metric.damageDealt])).toEqual([
-      ['Arc One', 300],
-      ['Bolt Two', 700],
-    ]);
+    expect(recalculated).not.toBeNull();
+    if (recalculated === null) throw new Error('Expected the recalculated run to be loadable from the archive.');
+
+    expect(recalculated.summary.metrics).toEqual(originalSummary.metrics);
+    expect(recalculated.summary.characterMetrics).toEqual(originalSummary.characterMetrics);
+    expect(recalculated.summary.participants).toEqual(originalSummary.participants);
+    expect(recalculated.summary.calculation).toEqual(originalSummary.calculation);
+    expect(recalculated.summary.metrics.elapsedSeconds).toBe(40);
+    expect(recalculated.summary.metrics.fleetDamageDealt).toBe(1000);
+    expect(recalculated.summary.schemaVersion).toBe(originalSummary.schemaVersion);
+    expect(recalculated.summary.parserVersion).toBe(originalSummary.parserVersion);
+    expect(recalculated.summary.id).toBe(originalSummary.id);
+    expect(recalculated.summary.site).toEqual(originalSummary.site);
+    expect(recalculated.summary.fleetProfile).toEqual(originalSummary.fleetProfile);
+    expect(recalculated.summary.window).toEqual(originalSummary.window);
+    expect(recalculated.summary.coverage).toEqual(originalSummary.coverage);
+    expect(recalculated.summary.notes).toBe(originalSummary.notes);
+    expect(recalculated.summary.fingerprint).toBe(originalSummary.fingerprint);
+    expect(recalculated.summary.createdAt).toBe(originalSummary.createdAt);
 
     expect(await runPublish({ out: publicDir, archive: archiveDir }, { write: () => undefined })).toMatchObject({
       status: 'published',
       runCount: 1,
     });
-    const publicDataset = await readFile(path.join(publicDir, 'data', 'runs.json'), 'utf8');
-    expect(publicDataset).not.toContain('Arc One');
-    expect(publicDataset).not.toContain('Bolt Two');
-    expect(publicDataset).not.toContain('Private fleet note');
+    const publicDatasetText = await readFile(path.join(publicDir, 'data', 'runs.json'), 'utf8');
+    const publicDataset = JSON.parse(publicDatasetText) as { runs: Array<Record<string, unknown>> };
+    const validatedPublicDataset = PublicDashboardDatasetSchema.parse(publicDataset);
+    expect(validatedPublicDataset.mode).toBe('public');
+    expect(validatedPublicDataset.capabilities).toEqual({ characters: false, notes: false });
+    for (const run of publicDataset.runs) {
+      for (const privateField of [
+        'participants',
+        'characterMetrics',
+        'notes',
+        'fingerprint',
+        'createdAt',
+        'updatedAt',
+        'parserVersion',
+        'metricsVersion',
+      ]) {
+        expect(Object.hasOwn(run, privateField)).toBe(false);
+      }
+    }
+    expect(publicDatasetText).not.toContain('Arc One');
+    expect(publicDatasetText).not.toContain('Bolt Two');
+    expect(publicDatasetText).not.toContain('Private fleet note');
   });
 });

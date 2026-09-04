@@ -4,6 +4,14 @@ Sitbench turns local EVE Online gamelogs into confirmed, reproducible PvE run re
 
 ## WSL setup
 
+Sitbench requires Node.js 22 or newer. Confirm that `node --version` reports version 22 or later before installing dependencies.
+
+For a first-time global CLI link, pnpm needs a configured global-bin directory. If `pnpm bin --global` already works, no setup is needed. Otherwise run the following once, then restart the WSL shell (or otherwise refresh its `PATH`) before running the global-link command below:
+
+```bash
+pnpm setup
+```
+
 Run these commands from the Sitbench checkout in WSL:
 
 ```bash
