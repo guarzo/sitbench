@@ -56,17 +56,29 @@ export type DashboardDataset = LocalDashboardDataset | PublicDashboardDataset;
 // Local builder
 // ---------------------------------------------------------------------------
 
+export interface BuildLocalDatasetOptions {
+  /** Override the generatedAt timestamp (defaults to current time). */
+  generatedAt?: string;
+}
+
 /**
  * Builds a local dashboard dataset from validated run summaries. Sorts runs
- * ascending by window start timestamp for predictable charting. Accepts only
- * `RunSummary` objects (never raw events or source files).
+ * ascending by window start timestamp, with run id as a stable tiebreak.
+ * Accepts only `RunSummary` objects (never raw events or source files).
  */
-export function buildLocalDashboardDataset(runs: RunSummary[]): LocalDashboardDataset {
-  const sorted = runs.slice().sort((a, b) => a.window.start.localeCompare(b.window.start));
+export function buildLocalDashboardDataset(
+  runs: RunSummary[],
+  options?: BuildLocalDatasetOptions,
+): LocalDashboardDataset {
+  const sorted = runs.slice().sort((a, b) => {
+    const cmp = a.window.start.localeCompare(b.window.start);
+    if (cmp !== 0) return cmp;
+    return a.id.localeCompare(b.id);
+  });
   return {
     schemaVersion: 1,
     mode: 'local',
-    generatedAt: new Date().toISOString(),
+    generatedAt: options?.generatedAt ?? new Date().toISOString(),
     capabilities: { characters: true, notes: true },
     runs: sorted,
   };

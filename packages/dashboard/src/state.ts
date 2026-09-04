@@ -7,6 +7,8 @@ import type { DashboardDataset, DashboardRun } from './data.js';
 export interface FilterState {
   siteKey: string | null;
   fleetProfileId: string | null;
+  dateFrom: string | null;
+  dateTo: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -46,13 +48,24 @@ export function profileOptions(dataset: DashboardDataset): Array<{ id: string; n
   return Array.from(seen.entries()).map(([id, name]) => ({ id, name }));
 }
 
-/** Returns runs matching the current filter (both keys). */
+/**
+ * Returns runs matching the current filter (site, profile, date range).
+ * Date range uses the run's window.start date (YYYY-MM-DD prefix).
+ */
 export function matchingRuns(state: DashboardState): DashboardRun[] {
-  return state.dataset.runs.filter(
-    (run) =>
-      (state.filter.siteKey === null || run.site.key === state.filter.siteKey) &&
-      (state.filter.fleetProfileId === null || run.fleetProfile.id === state.filter.fleetProfileId),
-  );
+  return state.dataset.runs.filter((run) => {
+    if (state.filter.siteKey !== null && run.site.key !== state.filter.siteKey) return false;
+    if (state.filter.fleetProfileId !== null && run.fleetProfile.id !== state.filter.fleetProfileId) return false;
+    if (state.filter.dateFrom !== null) {
+      const runDate = run.window.start.slice(0, 10);
+      if (runDate < state.filter.dateFrom) return false;
+    }
+    if (state.filter.dateTo !== null) {
+      const runDate = run.window.start.slice(0, 10);
+      if (runDate > state.filter.dateTo) return false;
+    }
+    return true;
+  });
 }
 
 /**
@@ -67,6 +80,8 @@ export function initializeState(dataset: DashboardDataset): DashboardState {
   const filter: FilterState = {
     siteKey: latest?.site.key ?? null,
     fleetProfileId: latest?.fleetProfile.id ?? null,
+    dateFrom: null,
+    dateTo: null,
   };
 
   const state: DashboardState = {
@@ -85,4 +100,22 @@ export function initializeState(dataset: DashboardDataset): DashboardState {
 export function selectedRun(state: DashboardState): DashboardRun | null {
   if (state.selectedRunId === null) return null;
   return matchingRuns(state).find((run) => run.id === state.selectedRunId) ?? null;
+}
+
+/**
+ * Reconciles selectedRunId and compareRunId after filter changes.
+ * If selectedRunId is no longer in the matched set, auto-selects the most
+ * recent. If compareRunId is no longer in the matched set, clears it.
+ */
+export function reconcileSelections(state: DashboardState): void {
+  const matched = matchingRuns(state);
+  const matchedIds = new Set(matched.map((r) => r.id));
+
+  if (state.selectedRunId !== null && !matchedIds.has(state.selectedRunId)) {
+    state.selectedRunId = matched.length > 0 ? matched[matched.length - 1]!.id : null;
+  }
+
+  if (state.compareRunId !== null && !matchedIds.has(state.compareRunId)) {
+    state.compareRunId = null;
+  }
 }

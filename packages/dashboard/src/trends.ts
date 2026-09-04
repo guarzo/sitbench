@@ -68,6 +68,10 @@ export function renderTrends(
   container.appendChild(selectorDiv);
 
   if (runs.length === 0) {
+    if (chartInstance !== null) {
+      chartInstance.destroy();
+      chartInstance = null;
+    }
     const msg = document.createElement('p');
     msg.className = 'trend-empty';
     msg.textContent = 'No data to chart.';

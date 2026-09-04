@@ -171,6 +171,7 @@ async function recalculateOne(
   id: string,
   dependencies: RecalculateDependencies,
 ): Promise<RecalculateOutcome> {
+  let catalogWarning: string | null = null;
   try {
     await archive.updateRun(id, ({ summary, events }) => {
       const fields = recalculateFields(summary.window, events, summary.calculation);
@@ -189,15 +190,28 @@ async function recalculateOne(
       return { id, status: 'not-found' };
     }
     if (error instanceof CatalogRebuildError) {
-      return { id, status: 'recalculated-with-warning', reason: message(error) };
-    }
-    if (isSchemaValidationError(error)) {
+      // Authoritative mutation succeeded; catalog derivative failed.
+      // Still attempt dashboard regeneration below.
+      catalogWarning = message(error);
+    } else if (isSchemaValidationError(error)) {
       return { id, status: 'incompatible', reason: message(error) };
+    } else {
+      return { id, status: 'error', reason: message(error) };
     }
-    return { id, status: 'error', reason: message(error) };
   }
 
-  await (dependencies.rebuildCatalog ?? rebuildCatalogNoop)(archive);
+  // Derivative: dashboard regeneration — always attempted after successful
+  // authoritative mutation, including after CatalogRebuildError.
+  try {
+    await (dependencies.rebuildCatalog ?? rebuildCatalogNoop)(archive);
+  } catch {
+    // Non-critical
+  }
+
+  if (catalogWarning !== null) {
+    return { id, status: 'recalculated-with-warning', reason: catalogWarning };
+  }
+
   return { id, status: 'recalculated' };
 }
 

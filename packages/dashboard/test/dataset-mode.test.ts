@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { DashboardCapabilities, DashboardDataset, PublicDashboardDataset, PublicRunSummary } from '../src/data.js';
 import { validateDataset, DatasetSchemaError } from '../src/data.js';
+import { renderDetail } from '../src/detail.js';
+import { renderCompare } from '../src/compare-view.js';
 
 function buildPublicRun(id: string): PublicRunSummary {
   return {
@@ -114,6 +116,36 @@ describe('dataset mode validation', () => {
     expect(() => validateDataset(null)).toThrow(DatasetSchemaError);
     expect(() => validateDataset([1, 2, 3])).toThrow(DatasetSchemaError);
   });
+
+  it('rejects local mode with non-true capability booleans', () => {
+    expect(() => validateDataset({
+      schemaVersion: 1,
+      mode: 'local',
+      generatedAt: new Date().toISOString(),
+      capabilities: { characters: false, notes: true },
+      runs: [],
+    })).toThrow(DatasetSchemaError);
+  });
+
+  it('rejects capabilities with non-boolean values', () => {
+    expect(() => validateDataset({
+      schemaVersion: 1,
+      mode: 'public',
+      generatedAt: new Date().toISOString(),
+      capabilities: { characters: 'yes', notes: false },
+      runs: [],
+    })).toThrow(DatasetSchemaError);
+  });
+
+  it('rejects a run missing required fields like id or metrics', () => {
+    expect(() => validateDataset({
+      schemaVersion: 1,
+      mode: 'public',
+      generatedAt: new Date().toISOString(),
+      capabilities: { characters: false, notes: false },
+      runs: [{ bogus: true }],
+    })).toThrow(DatasetSchemaError);
+  });
 });
 
 describe('public capability combinations', () => {
@@ -171,5 +203,92 @@ describe('public capability combinations', () => {
         expect(run.calculation).toBeDefined();
       }
     }
+  });
+});
+
+describe('capability-gated DOM rendering', () => {
+  function makeRunForDOM(capabilities: DashboardCapabilities): PublicRunSummary {
+    const base = buildPublicRun('dom-run');
+    return {
+      ...base,
+      ...(capabilities.characters
+        ? {
+            participants: ['Alpha'],
+            characterMetrics: [
+              {
+                character: 'Alpha',
+                damageDealt: 70000,
+                fleetDamageShare: 1,
+                averageDps: 116,
+                activeDps: 129,
+                damageTaken: 20000,
+                remoteRepairDelivered: 3000,
+                remoteRepairReceived: 2000,
+                shotsHit: 150,
+                shotsMissed: 10,
+                missRate: 0.0625,
+                hitQualityCounts: {},
+                firstRelevantEvent: null,
+                lastRelevantEvent: null,
+              },
+            ],
+          }
+        : {}),
+      ...(capabilities.notes ? { notes: 'A test note' } : {}),
+    };
+  }
+
+  it('renderDetail shows characters and notes when both capabilities true', () => {
+    const container = document.createElement('div');
+    const run = makeRunForDOM({ characters: true, notes: true });
+    renderDetail(container, run, { characters: true, notes: true });
+
+    expect(container.querySelector('.detail-characters')).not.toBeNull();
+    expect(container.querySelector('.detail-notes')).not.toBeNull();
+  });
+
+  it('renderDetail hides characters and notes when both capabilities false', () => {
+    const container = document.createElement('div');
+    const run = makeRunForDOM({ characters: false, notes: false });
+    renderDetail(container, run, { characters: false, notes: false });
+
+    expect(container.querySelector('.detail-characters')).toBeNull();
+    expect(container.querySelector('.detail-notes')).toBeNull();
+  });
+
+  it('renderDetail shows characters but hides notes when characters=true, notes=false', () => {
+    const container = document.createElement('div');
+    const run = makeRunForDOM({ characters: true, notes: false });
+    renderDetail(container, run, { characters: true, notes: false });
+
+    expect(container.querySelector('.detail-characters')).not.toBeNull();
+    expect(container.querySelector('.detail-notes')).toBeNull();
+  });
+
+  it('renderDetail hides characters but shows notes when characters=false, notes=true', () => {
+    const container = document.createElement('div');
+    const run = makeRunForDOM({ characters: false, notes: true });
+    renderDetail(container, run, { characters: false, notes: true });
+
+    expect(container.querySelector('.detail-characters')).toBeNull();
+    expect(container.querySelector('.detail-notes')).not.toBeNull();
+  });
+
+  it('renderCompare shows character comparison only when characters=true', () => {
+    const container = document.createElement('div');
+    const runA = makeRunForDOM({ characters: true, notes: false });
+    const runB = { ...makeRunForDOM({ characters: true, notes: false }), id: 'dom-run-b' };
+    renderCompare(container, [runA, runB], runA.id, runB.id, { characters: true, notes: false }, () => {}, () => {});
+
+    expect(container.querySelector('.compare-characters')).not.toBeNull();
+  });
+
+  it('renderCompare hides character comparison when characters=false', () => {
+    const container = document.createElement('div');
+    const runA = makeRunForDOM({ characters: false, notes: false });
+    const runB = { ...makeRunForDOM({ characters: false, notes: false }), id: 'dom-run-b' };
+    renderCompare(container, [runA, runB], runA.id, runB.id, { characters: false, notes: false }, () => {}, () => {});
+
+    expect(container.querySelector('.compare-characters')).toBeNull();
   });
 });

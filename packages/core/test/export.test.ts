@@ -94,6 +94,12 @@ describe('buildLocalDashboardDataset', () => {
     expect(typeof dataset.generatedAt).toBe('string');
   });
 
+  it('uses the injected generatedAt when provided', () => {
+    const runs = [buildRun({ windowStart: '2026-09-01T10:00:00.000Z' })];
+    const dataset = buildLocalDashboardDataset(runs, { generatedAt: '2026-09-05T00:00:00.000Z' });
+    expect(dataset.generatedAt).toBe('2026-09-05T00:00:00.000Z');
+  });
+
   it('includes complete run summaries needed for filters, detail, and comparison', () => {
     const run = buildRun({ windowStart: '2026-09-02T10:00:00.000Z' });
     const dataset = buildLocalDashboardDataset([run]);
@@ -119,6 +125,15 @@ describe('buildLocalDashboardDataset', () => {
 
     expect(dataset.runs[0]!.id).toBe(earlier.id);
     expect(dataset.runs[1]!.id).toBe(later.id);
+  });
+
+  it('breaks equal window.start ties by run id for stable ordering', () => {
+    const runB = buildRun({ windowStart: '2026-09-01T10:00:00.000Z', id: 'run-b' });
+    const runA = buildRun({ windowStart: '2026-09-01T10:00:00.000Z', id: 'run-a' });
+    const dataset = buildLocalDashboardDataset([runB, runA]);
+
+    expect(dataset.runs[0]!.id).toBe('run-a');
+    expect(dataset.runs[1]!.id).toBe('run-b');
   });
 
   it('returns an empty runs array when given no runs', () => {

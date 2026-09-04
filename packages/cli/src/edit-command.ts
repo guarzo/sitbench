@@ -198,6 +198,7 @@ export async function runEdit(arguments_: EditArguments, dependencies: EditDepen
     return { status: 'cancelled' };
   }
 
+  let catalogWarning: string | null = null;
   try {
     await archive.updateRun(runId, ({ summary: latest, events: latestEvents }) => {
       if (latest.updatedAt !== loadedUpdatedAt) {
@@ -205,9 +206,6 @@ export async function runEdit(arguments_: EditArguments, dependencies: EditDepen
           `Run "${runId}" was modified by another process after this edit began; the concurrent change was not overwritten.`,
         );
       }
-      // Always persist the full archived event stream this edit loaded
-      // (which, thanks to the conflict check above, is guaranteed to still
-      // be current) — never a window-narrowed subset.
       return { summary: pending, events: latestEvents };
     });
   } catch (error) {
@@ -224,25 +222,33 @@ export async function runEdit(arguments_: EditArguments, dependencies: EditDepen
       return fatal(write, `Run was not updated because the archive is locked. ${error.message}`, 'locked');
     }
     if (error instanceof CatalogRebuildError) {
-      write(`Run ${runId} was updated, but its catalog could not be rebuilt: ${error.message}`);
-      return { status: 'updated-with-warning', id: runId, reason: 'catalog' };
-    }
-    if (isSchemaValidationError(error)) {
+      catalogWarning = error.message;
+    } else if (isSchemaValidationError(error)) {
       return fatal(
         write,
         `Run "${runId}" cannot be edited: archived events do not satisfy the current schema.`,
         'incompatible',
       );
+    } else {
+      return fatal(write, `Run was not updated: ${message(error)}`, 'archive');
     }
-    return fatal(write, `Run was not updated: ${message(error)}`, 'archive');
   }
 
+  // Derivative generation: each attempted independently.
   try {
     await archive.upsertProfile(profileName);
+  } catch {
+    // Non-critical
+  }
+  try {
     await (dependencies.rebuildCatalog ?? rebuildCatalogNoop)(archive);
-  } catch (error) {
-    write(`Run ${runId} was updated, but follow-up archive generation failed: ${message(error)}`);
-    return { status: 'updated-with-warning', id: runId, reason: 'post-save' };
+  } catch {
+    // Non-critical
+  }
+
+  if (catalogWarning !== null) {
+    write(`Run ${runId} was updated, but its catalog could not be rebuilt: ${catalogWarning}`);
+    return { status: 'updated-with-warning', id: runId, reason: 'catalog' };
   }
 
   write(`Updated run ${runId}.`);

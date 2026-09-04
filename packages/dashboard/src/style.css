@@ -117,6 +117,7 @@ header .subtitle {
 }
 
 .filter-select,
+.filter-date,
 .trend-select,
 .compare-select {
   font-family: var(--font-body);
@@ -130,6 +131,7 @@ header .subtitle {
 }
 
 .filter-select:focus,
+.filter-date:focus,
 .trend-select:focus,
 .compare-select:focus {
   outline: 2px solid var(--border-focus);
@@ -271,7 +273,8 @@ header .subtitle {
 
 .history-row.selected {
   background: var(--amber-bg);
-  border-left: 3px solid var(--amber);
+  outline: 1px solid var(--amber-dim);
+  outline-offset: -1px;
 }
 
 .history-row:focus-visible {

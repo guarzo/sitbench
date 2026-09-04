@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LocalDashboardDataset } from '../src/data.js';
-import { initializeState, matchingRuns, profileOptions, selectedRun, siteOptions } from '../src/state.js';
+import { initializeState, matchingRuns, profileOptions, reconcileSelections, selectedRun, siteOptions } from '../src/state.js';
 import type { RunSummary } from '@sitbench/core';
 
 let idCounter = 0;
@@ -157,5 +157,67 @@ describe('selectedRun', () => {
     state.selectedRunId = 'nonexistent';
 
     expect(selectedRun(state)).toBeNull();
+  });
+});
+
+describe('date filtering', () => {
+  it('includes dateFrom and dateTo in FilterState', () => {
+    const run = buildRun({ windowStart: '2026-09-01T10:00:00.000Z' });
+    const dataset = buildDataset([run]);
+    const state = initializeState(dataset);
+
+    expect(state.filter.dateFrom).toBeNull();
+    expect(state.filter.dateTo).toBeNull();
+  });
+
+  it('filters runs by date range when dateFrom and dateTo are set', () => {
+    const early = buildRun({ windowStart: '2026-09-01T10:00:00.000Z' });
+    const mid = buildRun({ windowStart: '2026-09-05T10:00:00.000Z' });
+    const late = buildRun({ windowStart: '2026-09-10T10:00:00.000Z' });
+    const dataset = buildDataset([early, mid, late]);
+    const state = initializeState(dataset);
+    state.filter.siteKey = null;
+    state.filter.fleetProfileId = null;
+    state.filter.dateFrom = '2026-09-03';
+    state.filter.dateTo = '2026-09-07';
+
+    const matched = matchingRuns(state);
+    expect(matched).toHaveLength(1);
+    expect(matched[0]!.id).toBe(mid.id);
+  });
+});
+
+describe('reconcileSelections', () => {
+  it('clears selectedRunId and compareRunId when they leave the matched set', () => {
+    const runA = buildRun({ windowStart: '2026-09-01T10:00:00.000Z', siteKey: 'site-a' });
+    const runB = buildRun({ windowStart: '2026-09-02T10:00:00.000Z', siteKey: 'site-b' });
+    const dataset = buildDataset([runA, runB]);
+    const state = initializeState(dataset);
+    state.selectedRunId = runA.id;
+    state.compareRunId = runA.id;
+    state.filter.siteKey = 'site-b';
+    state.filter.fleetProfileId = null;
+
+    reconcileSelections(state);
+
+    // runA is no longer in matched set; should auto-select most recent matched
+    expect(state.selectedRunId).toBe(runB.id);
+    expect(state.compareRunId).toBeNull();
+  });
+
+  it('keeps selections when they remain in the matched set', () => {
+    const runA = buildRun({ windowStart: '2026-09-01T10:00:00.000Z', siteKey: 'site-a' });
+    const runB = buildRun({ windowStart: '2026-09-02T10:00:00.000Z', siteKey: 'site-a' });
+    const dataset = buildDataset([runA, runB]);
+    const state = initializeState(dataset);
+    state.selectedRunId = runA.id;
+    state.compareRunId = runB.id;
+    state.filter.siteKey = 'site-a';
+    state.filter.fleetProfileId = null;
+
+    reconcileSelections(state);
+
+    expect(state.selectedRunId).toBe(runA.id);
+    expect(state.compareRunId).toBe(runB.id);
   });
 });

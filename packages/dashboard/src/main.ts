@@ -3,7 +3,15 @@ import { renderCompare } from './compare-view.js';
 import { renderDetail } from './detail.js';
 import { renderHistory, type SortDir, type SortField } from './history.js';
 import { renderOverview } from './overview.js';
-import { initializeState, matchingRuns, profileOptions, selectedRun, siteOptions, type DashboardState } from './state.js';
+import {
+  initializeState,
+  matchingRuns,
+  profileOptions,
+  reconcileSelections,
+  selectedRun,
+  siteOptions,
+  type DashboardState,
+} from './state.js';
 import { renderTrends, type TrendMetric } from './trends.js';
 import './style.css';
 
@@ -14,7 +22,6 @@ import './style.css';
 let state: DashboardState | null = null;
 let currentTrendMetric: TrendMetric = 'elapsedSeconds';
 let historySort: { field: SortField; dir: SortDir } = { field: 'date', dir: 'desc' };
-let compareRightId: string | null = null;
 
 // ---------------------------------------------------------------------------
 // DOM references
@@ -80,14 +87,47 @@ function renderFilters(dataset: DashboardDataset, current: DashboardState): void
     profileSelect.appendChild(opt);
   }
 
+  // Date range filters
+  const dateFromLabel = document.createElement('label');
+  dateFromLabel.textContent = 'From: ';
+  dateFromLabel.htmlFor = 'filter-date-from';
+  const dateFromInput = document.createElement('input');
+  dateFromInput.type = 'date';
+  dateFromInput.id = 'filter-date-from';
+  dateFromInput.className = 'filter-date';
+  if (current.filter.dateFrom !== null) dateFromInput.value = current.filter.dateFrom;
+
+  const dateToLabel = document.createElement('label');
+  dateToLabel.textContent = 'To: ';
+  dateToLabel.htmlFor = 'filter-date-to';
+  const dateToInput = document.createElement('input');
+  dateToInput.type = 'date';
+  dateToInput.id = 'filter-date-to';
+  dateToInput.className = 'filter-date';
+  if (current.filter.dateTo !== null) dateToInput.value = current.filter.dateTo;
+
   siteSelect.addEventListener('change', () => {
     if (state === null) return;
     state.filter.siteKey = siteSelect.value || null;
+    reconcileSelections(state);
     update();
   });
   profileSelect.addEventListener('change', () => {
     if (state === null) return;
     state.filter.fleetProfileId = profileSelect.value || null;
+    reconcileSelections(state);
+    update();
+  });
+  dateFromInput.addEventListener('change', () => {
+    if (state === null) return;
+    state.filter.dateFrom = dateFromInput.value || null;
+    reconcileSelections(state);
+    update();
+  });
+  dateToInput.addEventListener('change', () => {
+    if (state === null) return;
+    state.filter.dateTo = dateToInput.value || null;
+    reconcileSelections(state);
     update();
   });
 
@@ -95,6 +135,10 @@ function renderFilters(dataset: DashboardDataset, current: DashboardState): void
   filtersEl.appendChild(siteSelect);
   filtersEl.appendChild(profileLabel);
   filtersEl.appendChild(profileSelect);
+  filtersEl.appendChild(dateFromLabel);
+  filtersEl.appendChild(dateFromInput);
+  filtersEl.appendChild(dateToLabel);
+  filtersEl.appendChild(dateToInput);
 }
 
 function update(): void {
@@ -102,11 +146,8 @@ function update(): void {
 
   const matched = matchingRuns(state);
 
-  // Auto-select the most recent matching run if selected is no longer in filtered set
-  const sel = selectedRun(state);
-  if (sel === null && matched.length > 0) {
-    state.selectedRunId = matched[matched.length - 1]!.id;
-  }
+  // Reconcile selections with matched set
+  reconcileSelections(state);
 
   const currentSel = selectedRun(state);
   const selIndex = currentSel !== null ? matched.findIndex((r) => r.id === currentSel.id) : -1;
@@ -131,15 +172,15 @@ function update(): void {
   });
   renderDetail(qs('#detail'), currentSel, state.dataset.capabilities);
 
-  // Compare: default right to previous if not set
-  if (compareRightId === null && selIndex > 0) {
-    compareRightId = matched[selIndex - 1]!.id;
+  // Compare: default right to previous if not set and in matched set
+  if (state.compareRunId === null && selIndex > 0) {
+    state.compareRunId = matched[selIndex - 1]!.id;
   }
   renderCompare(
     qs('#compare'),
     matched,
     state.selectedRunId,
-    compareRightId,
+    state.compareRunId,
     state.dataset.capabilities,
     (runId) => {
       if (state === null) return;
@@ -147,7 +188,8 @@ function update(): void {
       update();
     },
     (runId) => {
-      compareRightId = runId;
+      if (state === null) return;
+      state.compareRunId = runId;
       update();
     },
   );

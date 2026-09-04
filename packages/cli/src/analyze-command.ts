@@ -196,6 +196,7 @@ export async function runAnalyze(
     return { status: 'cancelled' };
   }
 
+  let catalogWarning: string | null = null;
   try {
     await archive.saveRun(summary, runEvents);
   } catch (error) {
@@ -206,23 +207,39 @@ export async function runAnalyze(
       return fatal(write, `Run was not saved because the archive is locked. ${error.message}`, 'locked');
     }
     if (error instanceof CatalogRebuildError) {
-      write(`Run ${summary.id} was saved, but its catalog could not be rebuilt: ${error.message}`);
-      return { status: 'saved-with-warning', id: summary.id, reason: 'catalog' };
+      // Authoritative mutation succeeded; catalog derivative failed.
+      // Continue to attempt dashboard regeneration and other derivatives.
+      catalogWarning = error.message;
+    } else {
+      return fatal(write, `Run was not saved: ${message(error)}`, 'archive');
     }
-    return fatal(write, `Run was not saved: ${message(error)}`, 'archive');
   }
 
+  // Derivative generation: dashboard data, profile upsert, config save.
+  // Each is attempted independently; failures become warnings.
   try {
     await archive.upsertProfile(profileName);
+  } catch {
+    // Non-critical
+  }
+  try {
     await (dependencies.rebuildCatalog ?? rebuildCatalogNoop)(archive);
+  } catch {
+    // Non-critical
+  }
+  try {
     await saveConfig(archiveDirectory, {
       gameLogDir: logDirectory,
       episodeThresholdSeconds: config.episodeThresholdSeconds,
       activeCombatGapSeconds: config.activeCombatGapSeconds,
     });
-  } catch (error) {
-    write(`Run ${summary.id} was saved, but follow-up archive generation failed: ${message(error)}`);
-    return { status: 'saved-with-warning', id: summary.id, reason: 'post-save' };
+  } catch {
+    // Non-critical
+  }
+
+  if (catalogWarning !== null) {
+    write(`Run ${summary.id} was saved, but its catalog could not be rebuilt: ${catalogWarning}`);
+    return { status: 'saved-with-warning', id: summary.id, reason: 'catalog' };
   }
 
   write(`Saved run ${summary.id}.`);

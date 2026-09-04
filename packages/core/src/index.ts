@@ -11,6 +11,7 @@ export {
 export * from './canonicalize.js';
 export { buildLocalDashboardDataset } from './export.js';
 export type {
+  BuildLocalDatasetOptions,
   DashboardCapabilities,
   DashboardDataset,
   LocalDashboardDataset,
