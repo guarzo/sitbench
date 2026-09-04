@@ -3,7 +3,9 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command, CommanderError } from 'commander';
 import { runAnalyze, type AnalyzeArguments, type AnalyzeResult } from './analyze-command.js';
+import { regenerateDashboardData } from './dashboard-export.js';
 import { runEdit, type EditArguments, type EditResult } from './edit-command.js';
+import { defaultArchiveDir } from './paths.js';
 import { runRecalculate, type RecalculateArguments, type RecalculateResult } from './recalculate-command.js';
 import { createConsolePrompts, createEditPrompts } from './ui.js';
 
@@ -113,16 +115,33 @@ export function isDirectEntryPoint(moduleUrl: string, argvPath: string | undefin
   return argvPath !== undefined && fileURLToPath(moduleUrl) === resolve(argvPath);
 }
 
+function makeDashboardRebuild(archiveDir: string): (archive: import('@sitbench/core').Archive) => Promise<void> {
+  return async (archive) => {
+    await regenerateDashboardData(archive, archiveDir);
+  };
+}
+
 async function executeInteractively(arguments_: AnalyzeArguments): Promise<AnalyzeResult> {
-  return runAnalyze(arguments_, { prompts: createConsolePrompts() });
+  const archiveDir = arguments_.archive ?? defaultArchiveDir();
+  return runAnalyze(arguments_, {
+    prompts: createConsolePrompts(),
+    rebuildCatalog: makeDashboardRebuild(archiveDir),
+  });
 }
 
 async function executeRecalculateInteractively(arguments_: RecalculateArguments): Promise<RecalculateResult> {
-  return runRecalculate(arguments_, {});
+  const archiveDir = arguments_.archive ?? defaultArchiveDir();
+  return runRecalculate(arguments_, {
+    rebuildCatalog: makeDashboardRebuild(archiveDir),
+  });
 }
 
 async function executeEditInteractively(arguments_: EditArguments): Promise<EditResult> {
-  return runEdit(arguments_, { prompts: createEditPrompts() });
+  const archiveDir = arguments_.archive ?? defaultArchiveDir();
+  return runEdit(arguments_, {
+    prompts: createEditPrompts(),
+    rebuildCatalog: makeDashboardRebuild(archiveDir),
+  });
 }
 
 if (isDirectEntryPoint(import.meta.url, process.argv[1])) {

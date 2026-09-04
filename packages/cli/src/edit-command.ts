@@ -250,8 +250,8 @@ export async function runEdit(arguments_: EditArguments, dependencies: EditDepen
 }
 
 async function rebuildCatalogNoop(): Promise<void> {
-  // Archive.updateRun already rebuilds catalog.json. Same Task 7
-  // dashboard-export extension point `analyze`/`recalculate` use.
+  // Archive.updateRun already rebuilds catalog.json. Dashboard regeneration
+  // is wired through the rebuildCatalog dependency.
 }
 
 function fatal(write: (line: string) => void, text: string, reason: string): EditResult {

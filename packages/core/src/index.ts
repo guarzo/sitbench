@@ -6,8 +6,17 @@ export {
   DuplicateRunError,
   InvalidRunIdError,
   RunNotFoundError,
+  writeFileAtomic,
 } from './archive.js';
 export * from './canonicalize.js';
+export { buildLocalDashboardDataset } from './export.js';
+export type {
+  DashboardCapabilities,
+  DashboardDataset,
+  LocalDashboardDataset,
+  PublicDashboardDataset,
+  PublicRunSummary,
+} from './export.js';
 export { compareMatchingRuns } from './comparisons.js';
 export type { RunComparison } from './comparisons.js';
 export { detectEpisodes } from './episodes.js';

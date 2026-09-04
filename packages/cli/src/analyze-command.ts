@@ -230,8 +230,8 @@ export async function runAnalyze(
 }
 
 async function rebuildCatalogNoop(): Promise<void> {
-  // Archive.saveRun already rebuilds catalog.json. Task 7 will replace this
-  // extension point with generated dashboard-data export.
+  // Archive.saveRun already rebuilds catalog.json. Dashboard regeneration
+  // is wired through the rebuildCatalog dependency.
 }
 
 async function readRecentLogFiles(directory: string): Promise<LogFile[]> {

@@ -202,8 +202,8 @@ async function recalculateOne(
 }
 
 async function rebuildCatalogNoop(): Promise<void> {
-  // Archive.updateRun already rebuilds catalog.json. This is the same Task 7
-  // dashboard-export extension point `analyze` uses.
+  // Archive.updateRun already rebuilds catalog.json. Dashboard regeneration
+  // is wired through the rebuildCatalog dependency.
 }
 
 function describeOutcome(id: string, outcome: RecalculateOutcome): string {
