@@ -1,5 +1,9 @@
 export * from './canonicalize.js';
+export { detectEpisodes } from './episodes.js';
+export type { CandidateEpisode, DetectEpisodesOptions } from './episodes.js';
 export { parseLogHeader } from './log-header.js';
+export { calculateRun } from './metrics.js';
+export type { CalculatedRun } from './metrics.js';
 export { parseCombatLine } from './log-line-parser.js';
 export type { ParsedObservation, SourceContext } from './log-line-parser.js';
 export { normalizeLogFile } from './normalize.js';
