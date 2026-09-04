@@ -179,8 +179,15 @@ describe('runRecalculate', () => {
     expect(result.status).toBe('partial');
     if (result.status === 'partial') {
       expect(result.outcomes).toHaveLength(2);
+      // The valid run's own recalculation succeeds and persists — the
+      // legacy sibling's id/fingerprint are intact, so duplicate-fingerprint
+      // enforcement can still proceed — but the legacy sibling's summary
+      // still fails the current strict schema, so the derived catalog.json
+      // rebuild that follows the successful write fails, surfacing as a
+      // warning rather than silently omitting the legacy run from the
+      // catalog or blocking the valid run's own update.
       expect(result.outcomes.find((outcome) => outcome.id === validSummary.id)).toMatchObject({
-        status: 'recalculated',
+        status: 'recalculated-with-warning',
       });
       expect(result.outcomes.find((outcome) => outcome.id === 'legacy-run')).toMatchObject({ status: 'incompatible' });
     }

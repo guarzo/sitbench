@@ -231,6 +231,22 @@ describe('Archive.saveRun', () => {
     const topLevelEntries = await readdir(archiveDir).catch(() => []);
     expect(topLevelEntries.includes('runs')).toBe(false);
   });
+
+  it('rejects a new run whose fingerprint collides with an existing legacy-incompatible run, as long as that run\'s own id/fingerprint are intact', async () => {
+    await mkdir(archiveDir, { recursive: true });
+    const legacyDir = path.join(archiveDir, 'runs', 'legacy-run');
+    await mkdir(legacyDir, { recursive: true });
+    const legacySummary = { ...buildSummary({ id: 'legacy-run', fingerprint: 'legacy-fingerprint' }), legacyExtraField: 'unsupported' };
+    await writeFile(path.join(legacyDir, 'run.json'), `${JSON.stringify(legacySummary, null, 2)}\n`, 'utf8');
+
+    const archive = new Archive(archiveDir);
+    const candidate = buildSummary({ id: 'new-run', fingerprint: 'legacy-fingerprint' });
+
+    await expect(archive.saveRun(candidate, [buildEvent()])).rejects.toThrow(DuplicateRunError);
+
+    const runDirExists = await readdir(path.join(archiveDir, 'runs')).then((entries) => entries.includes('new-run'));
+    expect(runDirExists).toBe(false);
+  });
 });
 
 describe('Archive.loadRun', () => {
@@ -283,6 +299,28 @@ describe('Archive.listRuns / rebuildCatalog', () => {
         createdAt: summary.createdAt,
       },
     ]);
+  });
+
+  it('throws and leaves the previous catalog.json byte-for-byte untouched rather than silently omitting an invalid run', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+    const baselineCatalog = await readFile(path.join(archiveDir, 'catalog.json'), 'utf8');
+
+    // A sibling run whose summary fails the current strict schema (but is
+    // otherwise readable JSON with a valid id/fingerprint) must never be
+    // silently excluded from a "successful" rebuild — that would make
+    // corruption invisible, since the resulting catalog.json would look
+    // identical to one built from only the valid runs.
+    const legacyDir = path.join(archiveDir, 'runs', 'legacy-run');
+    await mkdir(legacyDir, { recursive: true });
+    const legacySummary = { ...buildSummary({ id: 'legacy-run', fingerprint: 'legacy-fingerprint' }), legacyExtraField: 'unsupported' };
+    await writeFile(path.join(legacyDir, 'run.json'), `${JSON.stringify(legacySummary, null, 2)}\n`, 'utf8');
+
+    await expect(archive.rebuildCatalog()).rejects.toThrow(CatalogRebuildError);
+
+    const catalogAfterFailure = await readFile(path.join(archiveDir, 'catalog.json'), 'utf8');
+    expect(catalogAfterFailure).toBe(baselineCatalog);
   });
 });
 
@@ -413,25 +451,79 @@ describe('Archive.updateRun', () => {
     expect(updated.fingerprint).toBe(summary.fingerprint);
   });
 
-  it('updates a valid run even when an unrelated run has an incompatible summary', async () => {
+  it('updates a valid run despite an unrelated run whose summary is legacy-incompatible but whose id/fingerprint are intact, and reports the resulting catalog rebuild failure without discarding the update', async () => {
     const archive = new Archive(archiveDir);
     const summary = buildSummary();
     await archive.saveRun(summary, [buildEvent()]);
 
-    // An unrelated run whose run.json itself fails the current strict
-    // schema. The duplicate-fingerprint check inside updateRun must not
-    // let this unrelated, unparsable run block updating a different valid
-    // run — the same tolerance listRunIds() provides for enumeration.
+    // An unrelated run whose run.json fails the current strict
+    // RunSummarySchema (an unsupported extra field), but whose id and
+    // fingerprint are themselves intact. Duplicate-fingerprint enforcement
+    // must still be able to trust this run's identity/fingerprint (so a
+    // colliding update is still rejected — see the dedicated test below),
+    // but the derived catalog.json cannot represent it, so rebuilding the
+    // catalog after this update must fail loudly rather than silently
+    // omitting it.
     const legacyDir = path.join(archiveDir, 'runs', 'legacy-run');
     await mkdir(legacyDir, { recursive: true });
-    await writeFile(path.join(legacyDir, 'run.json'), '{"not":"a valid run summary"}', 'utf8');
+    const legacySummary = { ...buildSummary({ id: 'legacy-run', fingerprint: 'legacy-fingerprint' }), legacyExtraField: 'unsupported' };
+    await writeFile(path.join(legacyDir, 'run.json'), `${JSON.stringify(legacySummary, null, 2)}\n`, 'utf8');
 
-    const updated = await archive.updateRun(summary.id, ({ summary: current, events }) => ({
-      summary: { ...current, notes: 'updated despite an unrelated incompatible run' },
-      events,
-    }));
+    await expect(
+      archive.updateRun(summary.id, ({ summary: current, events }) => ({
+        summary: { ...current, notes: 'updated despite an unrelated legacy-incompatible run' },
+        events,
+      })),
+    ).rejects.toThrow(CatalogRebuildError);
 
-    expect(updated.notes).toBe('updated despite an unrelated incompatible run');
+    // The update itself must still be persisted — only the derivative
+    // catalog rebuild failed, not the authoritative run write.
+    const reloaded = await archive.loadRun(summary.id);
+    expect(reloaded?.summary.notes).toBe('updated despite an unrelated legacy-incompatible run');
+  });
+
+  it('rejects an update whose new fingerprint collides with an unrelated legacy-incompatible run, as long as that run\'s own id/fingerprint are intact', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    const legacyDir = path.join(archiveDir, 'runs', 'legacy-run');
+    await mkdir(legacyDir, { recursive: true });
+    const legacySummary = { ...buildSummary({ id: 'legacy-run', fingerprint: 'legacy-fingerprint' }), legacyExtraField: 'unsupported' };
+    await writeFile(path.join(legacyDir, 'run.json'), `${JSON.stringify(legacySummary, null, 2)}\n`, 'utf8');
+
+    await expect(
+      archive.updateRun(summary.id, ({ summary: current, events }) => ({
+        summary: { ...current, fingerprint: 'legacy-fingerprint' },
+        events,
+      })),
+    ).rejects.toThrow(DuplicateRunError);
+
+    const reloaded = await archive.loadRun(summary.id);
+    expect(reloaded?.summary.fingerprint).toBe(summary.fingerprint);
+  });
+
+  it('fails closed (rejects, mutating nothing) when an unrelated run has no trustworthy id or fingerprint at all', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    // Genuinely corrupt: no id, no fingerprint — duplicate-fingerprint
+    // enforcement cannot determine whether this run's fingerprint would
+    // collide, so it must fail closed rather than silently proceeding.
+    const corruptDir = path.join(archiveDir, 'runs', 'corrupt-run');
+    await mkdir(corruptDir, { recursive: true });
+    await writeFile(path.join(corruptDir, 'run.json'), '{"not":"a valid run summary"}', 'utf8');
+
+    await expect(
+      archive.updateRun(summary.id, ({ summary: current, events }) => ({
+        summary: { ...current, notes: 'should never be persisted' },
+        events,
+      })),
+    ).rejects.toThrow();
+
+    const reloaded = await archive.loadRun(summary.id);
+    expect(reloaded?.summary.notes).toBe(summary.notes);
   });
 });
 

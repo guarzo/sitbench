@@ -384,27 +384,46 @@ export class Archive {
   }
 
   /**
-   * Reads and validates every run summary, optionally excluding `excludeId`,
-   * silently skipping any entry whose own `run.json` fails the current
-   * strict schema. Used for `catalog.json` rebuilding and the
-   * duplicate-fingerprint check inside `updateRun`, both of which must be
-   * able to make progress for every other valid run even when one
-   * archived run's summary is incompatible — the same enumeration
-   * tolerance `listRunIds()` provides. Unlike `readAllRunSummaries()`
-   * (used by the public, validating `listRuns()`), a skipped, unparsable
-   * summary cannot contribute a trustworthy fingerprint/catalog entry, so
-   * omitting it here does not weaken the result for every other
-   * (parseable) run — it is simply left out of the derived index/check
-   * rather than blocking it entirely.
+   * Minimal shape required to trust a run's identity and fingerprint for
+   * duplicate-detection purposes only. Deliberately looser than
+   * `RunSummarySchema`: unrelated newer/legacy fields are allowed via
+   * `.passthrough()`, so a run whose summary is otherwise incompatible with
+   * the current strict schema (e.g. archived by an older parser version)
+   * can still participate in duplicate-fingerprint rejection as long as its
+   * identity and fingerprint are themselves intact.
    */
-  private async readValidRunSummaries(excludeId?: string): Promise<RunSummary[]> {
+  private readonly fingerprintIndexEntrySchema = z
+    .object({
+      id: z.string().regex(RUN_ID_PATTERN),
+      fingerprint: z.string().min(1),
+    })
+    .passthrough();
+
+  /**
+   * Reads every run's minimal `{ id, fingerprint }` pair for
+   * duplicate-fingerprint enforcement, optionally excluding `excludeId`.
+   * Unlike `readAllRunSummaries()`, this only requires the minimal shape
+   * above — not the full `RunSummarySchema` — so a run that is otherwise
+   * incompatible with the current strict schema (e.g. archived by an older
+   * parser version) still participates in duplicate rejection as long as
+   * its identity and fingerprint are trustworthy. Any run whose `run.json`
+   * cannot even satisfy this minimal shape — unreadable, malformed JSON, or
+   * a missing/invalid `id` or `fingerprint` — fails closed: this method
+   * throws rather than silently skipping it, because a fingerprint that
+   * cannot be determined might collide with the one being saved/updated,
+   * and duplicate detection must never be silently weakened before an
+   * authoritative mutation. Used by both `saveRun` (which excludes no id)
+   * and `updateRun` (which excludes the run being updated), so both
+   * enforce duplicates identically.
+   */
+  private async readFingerprintIndex(excludeId?: string): Promise<Array<{ id: string; fingerprint: string }>> {
     const runsDir = this.runsDir();
     if (!(await pathExists(runsDir))) {
       return [];
     }
 
     const entries = await readdir(runsDir, { withFileTypes: true });
-    const summaries: RunSummary[] = [];
+    const index: Array<{ id: string; fingerprint: string }> = [];
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.name.startsWith(TMP_PREFIX) || entry.name === excludeId) {
         continue;
@@ -413,23 +432,31 @@ export class Archive {
       if (!(await pathExists(runJsonPath))) {
         continue;
       }
-      try {
-        const raw = await readFile(runJsonPath, 'utf8');
-        summaries.push(RunSummarySchema.parse(JSON.parse(raw)));
-      } catch {
-        continue;
-      }
+      const raw = await readFile(runJsonPath, 'utf8');
+      const parsed = this.fingerprintIndexEntrySchema.parse(JSON.parse(raw));
+      index.push({ id: parsed.id, fingerprint: parsed.fingerprint });
     }
-    return summaries;
+    return index;
   }
 
-  /** Rebuilds `catalog.json` from validated run summaries. Assumes the caller already holds the lock. */
+  /**
+   * Rebuilds `catalog.json` from every run summary, all of which must fully
+   * validate against the current strict `RunSummarySchema`. Assumes the
+   * caller already holds the lock. An invalid or unreadable run summary
+   * anywhere in the archive must never be silently excluded from the
+   * catalog — that would make a corrupted/incompatible run invisible
+   * rather than reported — so the entire read-plus-write is wrapped in one
+   * try/catch: any failure (including a sibling summary failing to
+   * validate) surfaces as `CatalogRebuildError` and leaves the existing
+   * `catalog.json` file completely untouched, since `writeFileAtomic` is
+   * either never reached or itself never partially replaces the target.
+   */
   private async rebuildCatalogLocked(): Promise<CatalogEntry[]> {
-    const summaries = await this.readValidRunSummaries();
-    const entries = summaries.map(toCatalogEntry).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-
     try {
+      const summaries = await this.readAllRunSummaries();
+      const entries = summaries.map(toCatalogEntry).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
       await writeFileAtomic(this.catalogPath(), `${JSON.stringify(entries, null, 2)}\n`);
+      return entries;
     } catch (error) {
       throw new CatalogRebuildError(
         'The run was saved, but rebuilding catalog.json from validated run summaries failed. ' +
@@ -437,8 +464,6 @@ export class Archive {
         { cause: error },
       );
     }
-
-    return entries;
   }
 
   /**
@@ -461,11 +486,11 @@ export class Archive {
         throw new DuplicateRunError(`A run with id "${validatedSummary.id}" already exists in the archive.`);
       }
 
-      const existingSummaries = await this.readAllRunSummaries();
-      if (existingSummaries.some((run) => run.fingerprint === validatedSummary.fingerprint)) {
+      const existingIndex = await this.readFingerprintIndex();
+      if (existingIndex.some((run) => run.fingerprint === validatedSummary.fingerprint)) {
         throw new DuplicateRunError(
           `A run with fingerprint "${validatedSummary.fingerprint}" already exists in the archive (id "${
-            existingSummaries.find((run) => run.fingerprint === validatedSummary.fingerprint)?.id
+            existingIndex.find((run) => run.fingerprint === validatedSummary.fingerprint)?.id
           }").`,
         );
       }
@@ -603,11 +628,11 @@ export class Archive {
       });
       const finalEvents = updated.events.map((event) => NormalizedEventSchema.parse(event));
 
-      const otherSummaries = await this.readValidRunSummaries(id);
-      if (otherSummaries.some((run) => run.fingerprint === finalSummary.fingerprint)) {
+      const otherIndex = await this.readFingerprintIndex(id);
+      if (otherIndex.some((run) => run.fingerprint === finalSummary.fingerprint)) {
         throw new DuplicateRunError(
           `Cannot update run "${id}": fingerprint "${finalSummary.fingerprint}" is already used by another run (id "${
-            otherSummaries.find((run) => run.fingerprint === finalSummary.fingerprint)?.id
+            otherIndex.find((run) => run.fingerprint === finalSummary.fingerprint)?.id
           }").`,
         );
       }
