@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -7,7 +7,11 @@ import {
   ArchiveLockedError,
   CatalogRebuildError,
   DuplicateRunError,
+  InvalidRunIdError,
   RunNotFoundError,
+  acquireLock,
+  writeFileAtomic,
+  writeRunDirectoryAtomic,
 } from '../src/archive.js';
 import type { NormalizedEvent, RunSummary } from '../src/schemas.js';
 
@@ -147,7 +151,6 @@ describe('Archive.saveRun', () => {
 
   it('fails clearly when a lock file is already held by another process, without creating a run', async () => {
     await mkdir(archiveDir, { recursive: true });
-    const { writeFile } = await import('node:fs/promises');
     await writeFile(path.join(archiveDir, '.lock'), '999999', 'utf8');
 
     const archive = new Archive(archiveDir);
@@ -217,6 +220,36 @@ describe('Archive.saveRun', () => {
     const entries = await archive.rebuildCatalog();
     expect(entries).toHaveLength(1);
     expect(entries[0]?.id).toBe(summary.id);
+  });
+
+  it('rejects a run id containing a path-traversal segment before touching the filesystem', async () => {
+    const archive = new Archive(archiveDir);
+    const traversal = buildSummary({ id: '../../outside-archive' });
+
+    await expect(archive.saveRun(traversal, [buildEvent()])).rejects.toThrow();
+
+    const topLevelEntries = await readdir(archiveDir).catch(() => []);
+    expect(topLevelEntries.includes('runs')).toBe(false);
+  });
+});
+
+describe('Archive.loadRun', () => {
+  it('fails clearly with ArchiveLockedError when the archive is locked by another process', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    // Simulate a concurrent writer holding the lock (guards against a
+    // "mixed generation" read — run.json from one update paired with a stale
+    // or in-progress events.jsonl).
+    await writeFile(path.join(archiveDir, '.lock'), '999999', 'utf8');
+
+    await expect(archive.loadRun(summary.id)).rejects.toThrow(ArchiveLockedError);
+  });
+
+  it('rejects a path-traversal id before touching the filesystem', async () => {
+    const archive = new Archive(archiveDir);
+    await expect(archive.loadRun('../../outside-archive')).rejects.toThrow(InvalidRunIdError);
   });
 });
 
@@ -306,6 +339,46 @@ describe('Archive.updateRun', () => {
       })),
     ).rejects.toThrow();
   });
+
+  it('rejects a path-traversal id before touching the filesystem', async () => {
+    const archive = new Archive(archiveDir);
+    await expect(
+      archive.updateRun('../../outside-archive', ({ summary, events }) => ({ summary, events })),
+    ).rejects.toThrow(InvalidRunIdError);
+  });
+
+  it('rejects an update whose new fingerprint collides with a different existing run, leaving both runs unchanged', async () => {
+    const archive = new Archive(archiveDir);
+    const runA = buildSummary({ id: 'run-a', fingerprint: 'fp-a' });
+    const runB = buildSummary({ id: 'run-b', fingerprint: 'fp-b' });
+    await archive.saveRun(runA, [buildEvent()]);
+    await archive.saveRun(runB, [buildEvent()]);
+
+    await expect(
+      archive.updateRun(runB.id, ({ summary: current, events }) => ({
+        summary: { ...current, fingerprint: runA.fingerprint },
+        events,
+      })),
+    ).rejects.toThrow(DuplicateRunError);
+
+    const reloadedA = await archive.loadRun(runA.id);
+    const reloadedB = await archive.loadRun(runB.id);
+    expect(reloadedA?.summary.fingerprint).toBe('fp-a');
+    expect(reloadedB?.summary.fingerprint).toBe('fp-b');
+  });
+
+  it('allows an update that keeps the same fingerprint it already had (self-match is not a collision)', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    const updated = await archive.updateRun(summary.id, ({ summary: current, events }) => ({
+      summary: { ...current, notes: 'still the same fingerprint' },
+      events,
+    }));
+
+    expect(updated.fingerprint).toBe(summary.fingerprint);
+  });
 });
 
 describe('Archive.loadProfiles / upsertProfile', () => {
@@ -340,5 +413,93 @@ describe('Archive.loadProfiles / upsertProfile', () => {
 
     const profiles = await archive.loadProfiles();
     expect(profiles.map((p) => p.id).sort()).toEqual(['8-kikis-2-deacons', 'solo-vindicator']);
+  });
+});
+
+describe('writeFileAtomic (temp-file cleanup on failure)', () => {
+  it('removes its temp file when the final rename fails, without touching the pre-existing target', async () => {
+    const targetPath = path.join(archiveDir, 'target.json');
+    // Pre-occupy the target with a directory so renaming a file onto it fails.
+    await mkdir(targetPath, { recursive: true });
+    await writeFile(path.join(targetPath, 'sentinel.txt'), 'do-not-touch', 'utf8');
+
+    await expect(writeFileAtomic(targetPath, '{}')).rejects.toThrow();
+
+    // The pre-existing target directory and its contents must be untouched.
+    const targetEntries = await readdir(targetPath);
+    expect(targetEntries).toEqual(['sentinel.txt']);
+
+    // No leftover .tmp-* file anywhere in the archive directory.
+    const archiveEntries = await readdir(archiveDir);
+    expect(archiveEntries.some((name) => name.startsWith('.tmp-'))).toBe(false);
+  });
+});
+
+describe('writeRunDirectoryAtomic (temp-directory cleanup on failure)', () => {
+  it('removes its temp directory when the final rename fails, without touching the pre-existing target', async () => {
+    const runsDir = path.join(archiveDir, 'runs');
+    const targetDir = path.join(runsDir, 'existing-run');
+    // A non-empty pre-existing target directory makes the final rename fail
+    // (renaming a directory onto a non-empty directory is rejected).
+    await mkdir(targetDir, { recursive: true });
+    await writeFile(path.join(targetDir, 'sentinel.txt'), 'do-not-touch', 'utf8');
+
+    await expect(
+      writeRunDirectoryAtomic(runsDir, targetDir, buildSummary(), [buildEvent()]),
+    ).rejects.toThrow();
+
+    // The pre-existing target must be untouched.
+    const targetEntries = await readdir(targetDir);
+    expect(targetEntries).toEqual(['sentinel.txt']);
+
+    // No leftover .tmp-* directory remains inside runs/.
+    const runsEntries = await readdir(runsDir);
+    expect(runsEntries).toEqual(['existing-run']);
+  });
+});
+
+describe('acquireLock (ownership token)', () => {
+  it('does not delete a replacement lock created by another owner after the original lock file was manually removed', async () => {
+    const release1 = await acquireLock(archiveDir);
+
+    // An operator (or another process) removes what it believes is a stale
+    // lock, then a different process legitimately acquires a fresh one.
+    await rm(path.join(archiveDir, '.lock'), { force: true });
+    const release2 = await acquireLock(archiveDir);
+
+    // The original (now-stale) release must NOT delete the replacement lock.
+    await release1();
+    const lockStillPresent = await readFile(path.join(archiveDir, '.lock'), 'utf8').then(
+      () => true,
+      () => false,
+    );
+    expect(lockStillPresent).toBe(true);
+
+    // The legitimate owner's release still works normally.
+    await release2();
+    const lockGone = await readFile(path.join(archiveDir, '.lock'), 'utf8').then(
+      () => false,
+      () => true,
+    );
+    expect(lockGone).toBe(true);
+  });
+
+  it('cleans up the lock file it created if writing lock metadata fails during acquisition, without leaking it', async () => {
+    const failingWrite = async (): Promise<void> => {
+      throw new Error('simulated lock-metadata write failure');
+    };
+
+    await expect(acquireLock(archiveDir, failingWrite)).rejects.toThrow('simulated lock-metadata write failure');
+
+    // The failed acquisition must not leave the lock file behind...
+    const lockGoneAfterFailure = await readFile(path.join(archiveDir, '.lock'), 'utf8').then(
+      () => false,
+      () => true,
+    );
+    expect(lockGoneAfterFailure).toBe(true);
+
+    // ...so a subsequent real acquisition succeeds rather than hitting a leaked lock.
+    const release = await acquireLock(archiveDir);
+    await release();
   });
 });

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { FileHandle } from 'node:fs/promises';
 import { mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import { z } from 'zod';
@@ -7,6 +8,7 @@ import {
   CatalogEntrySchema,
   FleetProfileSchema,
   NormalizedEventSchema,
+  RUN_ID_PATTERN,
   RunSummarySchema,
   type CatalogEntry,
   type FleetProfile,
@@ -20,6 +22,9 @@ const TMP_PREFIX = '.tmp-';
 export class DuplicateRunError extends Error {}
 export class RunNotFoundError extends Error {}
 export class ArchiveLockedError extends Error {}
+
+/** Thrown when a run id is not a single safe path segment (see `RUN_ID_PATTERN`). */
+export class InvalidRunIdError extends Error {}
 
 /**
  * Thrown when the authoritative run write succeeds but the derived
@@ -45,19 +50,48 @@ async function pathExists(target: string): Promise<boolean> {
   }
 }
 
-/** Writes content to a temp file in the same directory, then renames it into place atomically. */
-async function writeFileAtomic(targetPath: string, content: string): Promise<void> {
+/**
+ * Rejects any run id that is not a single safe path segment, independent of
+ * whether the caller went through `RunSummarySchema` (e.g. `loadRun`/
+ * `updateRun` accept a raw id string directly). This is defense in depth at
+ * the archive's path-construction boundary: a value such as
+ * `"../../outside-archive"` is rejected before it is ever joined into a
+ * filesystem path.
+ */
+function assertSafeRunId(id: string): void {
+  if (!RUN_ID_PATTERN.test(id)) {
+    throw new InvalidRunIdError(
+      `Run id "${id}" is not a single safe path segment (letters, digits, "-", "_", "." only; must not start with those symbols).`,
+    );
+  }
+}
+
+/**
+ * Writes content to a temp file in the same directory, then renames it into
+ * place atomically. If any step fails, the temp file is removed in
+ * `finally`; the (possibly pre-existing) target path is never touched
+ * except by a successful rename.
+ */
+export async function writeFileAtomic(targetPath: string, content: string): Promise<void> {
   const dir = path.dirname(targetPath);
   await mkdir(dir, { recursive: true });
   const tmpPath = path.join(dir, `${TMP_PREFIX}${randomUUID()}`);
-  const handle = await open(tmpPath, 'w');
+  let renamed = false;
   try {
-    await handle.writeFile(content, 'utf8');
-    await handle.sync();
+    const handle = await open(tmpPath, 'w');
+    try {
+      await handle.writeFile(content, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(tmpPath, targetPath);
+    renamed = true;
   } finally {
-    await handle.close();
+    if (!renamed) {
+      await rm(tmpPath, { force: true });
+    }
   }
-  await rename(tmpPath, targetPath);
 }
 
 /** Writes content to a fresh file (caller-owned directory), flushing and closing before returning. */
@@ -71,18 +105,80 @@ async function writeFileFlushed(targetPath: string, content: string): Promise<vo
   }
 }
 
+function serializeEvents(events: NormalizedEvent[]): string {
+  if (events.length === 0) {
+    return '';
+  }
+  return `${events.map((event) => JSON.stringify(event)).join('\n')}\n`;
+}
+
+/**
+ * Writes `run.json` and `events.jsonl` into a fresh temporary sibling
+ * directory under `runsDir`, flushes and closes each file, then renames the
+ * temporary directory into `targetDir` atomically. If any step before the
+ * rename fails (or the rename itself fails), the temporary directory is
+ * removed in `finally`; `targetDir` — including any pre-existing content —
+ * is only ever touched by a successful rename, never deleted by this
+ * function.
+ */
+export async function writeRunDirectoryAtomic(
+  runsDir: string,
+  targetDir: string,
+  summary: RunSummary,
+  events: NormalizedEvent[],
+): Promise<void> {
+  await mkdir(runsDir, { recursive: true });
+  const tmpDir = path.join(runsDir, `${TMP_PREFIX}${randomUUID()}`);
+  let renamed = false;
+  try {
+    await mkdir(tmpDir, { recursive: true });
+    await writeFileFlushed(path.join(tmpDir, 'run.json'), `${JSON.stringify(summary, null, 2)}\n`);
+    await writeFileFlushed(path.join(tmpDir, 'events.jsonl'), serializeEvents(events));
+    await rename(tmpDir, targetDir);
+    renamed = true;
+  } finally {
+    if (!renamed) {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  }
+}
+
 /**
  * Acquires an archive-local exclusive lock by atomically creating a lock
  * file (`open(..., 'wx')` fails with EEXIST if one already exists). A
  * competing writer fails clearly and immediately rather than spin-waiting or
- * racing; a held lock is never force-broken. Callers must release the
- * returned function in a `finally` block.
+ * racing; a held lock is never force-broken.
+ *
+ * The lock file's content is an ownership token (a fresh UUID) unique to
+ * this acquisition. The returned release function only removes the lock
+ * file if it still contains that exact token — if the lock file was
+ * manually removed and then re-created by a different acquisition (e.g. an
+ * operator recovering from what they believed was a stale lock, followed by
+ * another process legitimately acquiring it), releasing the original
+ * acquisition must never delete the replacement lock out from under its
+ * new owner.
+ *
+ * If writing/syncing/closing the lock file's token fails after the file was
+ * successfully created, the just-created lock file is removed before
+ * rethrowing so a failed acquisition never leaks a lock. `writeLockMetadata`
+ * is an injectable seam (defaulting to the real implementation) purely so
+ * this failure path can be exercised deterministically in tests; production
+ * callers never override it.
+ *
+ * Callers must release the returned function in a `finally` block.
  */
-async function acquireLock(archiveDir: string): Promise<() => Promise<void>> {
+export async function acquireLock(
+  archiveDir: string,
+  writeLockMetadata: (handle: FileHandle, token: string) => Promise<void> = async (handle, token) => {
+    await handle.writeFile(token, 'utf8');
+    await handle.sync();
+  },
+): Promise<() => Promise<void>> {
   await mkdir(archiveDir, { recursive: true });
   const lockPath = path.join(archiveDir, LOCK_FILE_NAME);
+  const token = randomUUID();
 
-  let handle;
+  let handle: FileHandle;
   try {
     handle = await open(lockPath, 'wx');
   } catch (error) {
@@ -96,14 +192,33 @@ async function acquireLock(archiveDir: string): Promise<() => Promise<void>> {
   }
 
   try {
-    await handle.writeFile(String(process.pid), 'utf8');
-    await handle.sync();
-  } finally {
-    await handle.close();
+    try {
+      await writeLockMetadata(handle, token);
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    // Setup failed after we exclusively created the lock file: we know we
+    // own it (no one else could have), so clean it up rather than leak it.
+    await rm(lockPath, { force: true });
+    throw error;
   }
 
   return async () => {
-    await rm(lockPath, { force: true });
+    let currentToken: string;
+    try {
+      currentToken = await readFile(lockPath, 'utf8');
+    } catch (error) {
+      if (isErrnoException(error) && error.code === 'ENOENT') {
+        return; // Already gone (e.g. manually removed); nothing to clean up.
+      }
+      throw error;
+    }
+    if (currentToken === token) {
+      await rm(lockPath, { force: true });
+    }
+    // Else: the lock file has since been replaced by a different owner.
+    // Never delete a lock we do not currently own.
   };
 }
 
@@ -122,13 +237,6 @@ function toCatalogEntry(summary: RunSummary): CatalogEntry {
     fingerprint: summary.fingerprint,
     createdAt: summary.createdAt,
   });
-}
-
-function serializeEvents(events: NormalizedEvent[]): string {
-  if (events.length === 0) {
-    return '';
-  }
-  return `${events.map((event) => JSON.stringify(event)).join('\n')}\n`;
 }
 
 function parseEventsJsonl(raw: string): NormalizedEvent[] {
@@ -154,6 +262,7 @@ export class Archive {
   }
 
   private runDir(id: string): string {
+    assertSafeRunId(id);
     return path.join(this.runsDir(), id);
   }
 
@@ -235,13 +344,7 @@ export class Archive {
         );
       }
 
-      await mkdir(this.runsDir(), { recursive: true });
-      const tmpDir = path.join(this.runsDir(), `${TMP_PREFIX}${randomUUID()}`);
-      await mkdir(tmpDir, { recursive: true });
-      await writeFileFlushed(path.join(tmpDir, 'run.json'), `${JSON.stringify(validatedSummary, null, 2)}\n`);
-      await writeFileFlushed(path.join(tmpDir, 'events.jsonl'), serializeEvents(validatedEvents));
-
-      await rename(tmpDir, targetDir);
+      await writeRunDirectoryAtomic(this.runsDir(), targetDir, validatedSummary, validatedEvents);
 
       await this.rebuildCatalogLocked();
 
@@ -251,8 +354,13 @@ export class Archive {
     }
   }
 
-  /** Loads and validates a single run's summary and events. Returns `null` if the run does not exist. */
-  async loadRun(id: string): Promise<{ summary: RunSummary; events: NormalizedEvent[] } | null> {
+  /**
+   * Loads and validates a single run's summary and events without acquiring
+   * the archive lock. Used internally by mutation methods that already hold
+   * the lock (re-acquiring it would self-deadlock against a plain
+   * create-exclusive file lock).
+   */
+  private async loadRunLocked(id: string): Promise<{ summary: RunSummary; events: NormalizedEvent[] } | null> {
     const dir = this.runDir(id);
     if (!(await pathExists(dir))) {
       return null;
@@ -265,6 +373,27 @@ export class Archive {
     const events = parseEventsJsonl(eventsRaw);
 
     return { summary, events };
+  }
+
+  /**
+   * Loads and validates a single run's summary and events. Returns `null` if
+   * the run does not exist. A run is stored as two separate files
+   * (`run.json` and `events.jsonl`); `updateRun` rewrites them via two
+   * separate atomic renames (a true multi-file transaction is not possible
+   * with plain filesystem renames). Acquiring the archive lock for the
+   * duration of this read prevents observing a "mixed generation" — e.g. the
+   * new `run.json` paired with the old `events.jsonl` mid-update. If the
+   * archive is currently locked by another operation, this fails clearly
+   * with `ArchiveLockedError` rather than silently risking a mixed read; no
+   * retry loop is implemented.
+   */
+  async loadRun(id: string): Promise<{ summary: RunSummary; events: NormalizedEvent[] } | null> {
+    const release = await acquireLock(this.archiveDir);
+    try {
+      return await this.loadRunLocked(id);
+    } finally {
+      await release();
+    }
   }
 
   /** Returns every validated run summary in the archive (read-only; no lock required). */
@@ -306,7 +435,7 @@ export class Archive {
         throw new RunNotFoundError(`Run "${id}" does not exist in the archive.`);
       }
 
-      const current = await this.loadRun(id);
+      const current = await this.loadRunLocked(id);
       if (current === null) {
         throw new RunNotFoundError(`Run "${id}" does not exist in the archive.`);
       }
@@ -324,6 +453,15 @@ export class Archive {
         updatedAt: new Date().toISOString(),
       });
       const finalEvents = updated.events.map((event) => NormalizedEventSchema.parse(event));
+
+      const otherSummaries = (await this.readAllRunSummaries()).filter((run) => run.id !== id);
+      if (otherSummaries.some((run) => run.fingerprint === finalSummary.fingerprint)) {
+        throw new DuplicateRunError(
+          `Cannot update run "${id}": fingerprint "${finalSummary.fingerprint}" is already used by another run (id "${
+            otherSummaries.find((run) => run.fingerprint === finalSummary.fingerprint)?.id
+          }").`,
+        );
+      }
 
       await writeFileAtomic(path.join(dir, 'run.json'), `${JSON.stringify(finalSummary, null, 2)}\n`);
       await writeFileAtomic(path.join(dir, 'events.jsonl'), serializeEvents(finalEvents));

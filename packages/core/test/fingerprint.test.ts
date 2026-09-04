@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { fingerprintRun } from '../src/fingerprint.js';
 import type { NormalizedEvent, RunWindow } from '../src/schemas.js';
@@ -144,5 +145,57 @@ describe('fingerprintRun', () => {
   it('produces a stable fingerprint for an empty event list', () => {
     const win = window(0, 0);
     expect(fingerprintRun([], win)).toBe(fingerprintRun([], win));
+  });
+
+  it('sorts by strict code-unit comparison, not locale-aware collation (environment-independent digest)', () => {
+    // `String.prototype.localeCompare` alphabetizes case-insensitively-ish,
+    // so "alpha" conventionally sorts before "Zulu". Strict code-unit
+    // comparison sorts the other way: 'Z' is U+005A (90) and 'a' is U+0061
+    // (97), so "Zulu" sorts first. A fingerprint must hash identically on
+    // every machine regardless of its default locale/ICU data, so it must
+    // use code-unit comparison. This test hand-derives the expected sha256
+    // digest assuming code-unit ordering (the "Zulu" record first) without
+    // ever calling `localeCompare` to compute the expectation.
+    const win = window(0, 50);
+    const eventZulu = damageDealt(5, { actor: 'Zulu', sourceLine: 1 });
+    const eventAlpha = damageDealt(5, { actor: 'alpha', sourceLine: 1 });
+
+    const expectedPayload = {
+      windowStart: win.start,
+      windowEnd: win.end,
+      records: [
+        {
+          timestamp: atSeconds(5),
+          kind: 'damage-dealt',
+          actor: 'Zulu',
+          target: 'Sleepless Guardian',
+          amount: 100,
+          observedBy: 'Dah Nee',
+          sourceFile: 'fingerprint.txt',
+          sourceLine: 1,
+        },
+        {
+          timestamp: atSeconds(5),
+          kind: 'damage-dealt',
+          actor: 'alpha',
+          target: 'Sleepless Guardian',
+          amount: 100,
+          observedBy: 'Dah Nee',
+          sourceFile: 'fingerprint.txt',
+          sourceLine: 1,
+        },
+      ],
+    };
+    const expectedDigest = createHash('sha256').update(JSON.stringify(expectedPayload)).digest('hex');
+
+    // Feed the events in the opposite (alpha, then Zulu) order to prove the
+    // sort itself — not incidental input order — produces this result.
+    expect(fingerprintRun([eventAlpha, eventZulu], win)).toBe(expectedDigest);
+
+    // Sanity check: this scenario genuinely distinguishes code-unit order
+    // from this environment's locale-aware collation (if it didn't, the
+    // test above would be unable to detect a regression back to
+    // `localeCompare`).
+    expect('Zulu'.localeCompare('alpha')).toBeGreaterThan(0);
   });
 });

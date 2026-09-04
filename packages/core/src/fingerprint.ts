@@ -36,6 +36,21 @@ function recordSortKey(record: FingerprintRecord): string {
 }
 
 /**
+ * Strict code-unit (ordinal) string comparison. Deliberately NOT
+ * `String.prototype.localeCompare`: locale-aware collation depends on the
+ * running process's ICU data and default locale (e.g. it conventionally
+ * sorts "alpha" before "Zulu" alphabetically, while ordinal comparison sorts
+ * "Zulu" first because 'Z' (U+005A) is a lower code unit than 'a' (U+0061)).
+ * A fingerprint must hash identically across every environment, so sorting
+ * must never depend on locale/ICU configuration.
+ */
+function compareCodeUnits(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+/**
  * Produces a stable content-based fingerprint for a confirmed run window.
  *
  * Only events whose timestamp falls inside `[window.start, window.end]`
@@ -58,7 +73,7 @@ export function fingerprintRun(events: NormalizedEvent[], window: RunWindow): st
       return timestampMs >= startMs && timestampMs <= endMs;
     })
     .map(toRecord)
-    .sort((a, b) => recordSortKey(a).localeCompare(recordSortKey(b)));
+    .sort((a, b) => compareCodeUnits(recordSortKey(a), recordSortKey(b)));
 
   const payload = {
     windowStart: window.start,

@@ -3,6 +3,7 @@ export {
   ArchiveLockedError,
   CatalogRebuildError,
   DuplicateRunError,
+  InvalidRunIdError,
   RunNotFoundError,
 } from './archive.js';
 export * from './canonicalize.js';

@@ -7,6 +7,15 @@ import { z } from 'zod';
 /** ISO 8601 datetime string with timezone offset. */
 const IsoDateTimeString = z.string().datetime({ offset: true });
 
+/**
+ * A single safe filesystem path segment: must start with a letter or digit
+ * and contain only letters, digits, '-', '_', or '.' afterward. This
+ * excludes '/', '\\', and NUL, and excludes '.' / '..' (which cannot start
+ * with a letter or digit), so a validated id can never be used to escape
+ * an archive directory via path traversal.
+ */
+export const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
 // ---------------------------------------------------------------------------
 // Normalized event base (strict so unknown keys are rejected on every variant)
 // ---------------------------------------------------------------------------
@@ -256,8 +265,8 @@ export const RunSummarySchema = z
     schemaVersion: z.literal(1),
     parserVersion: z.string().min(1),
     metricsVersion: z.string().min(1),
-    /** Unique run identifier: `<datetime>-<site-key>`. */
-    id: z.string().min(1),
+    /** Unique run identifier: `<datetime>-<site-key>`. Must be a single safe path segment. */
+    id: z.string().min(1).regex(RUN_ID_PATTERN, 'id must be a single safe path segment'),
     site: SiteIdentitySchema,
     fleetProfile: FleetProfileSchema,
     window: RunWindowSchema,

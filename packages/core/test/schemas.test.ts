@@ -4,7 +4,50 @@ import {
   NormalizedEventSchema,
   CharacterMetricsSchema,
   SiteIdentitySchema,
+  RUN_ID_PATTERN,
 } from '../src/schemas.js';
+
+function minimalRunSummaryFields(id: string) {
+  return {
+    schemaVersion: 1 as const,
+    parserVersion: '0.1.0',
+    metricsVersion: '0.1.0',
+    id,
+    site: { name: 'Core Bastion', key: 'core-bastion' },
+    fleetProfile: { id: '8-kikis-2-deacons', name: '8 Kikis + 2 Deacons' },
+    window: {
+      start: '2026-09-03T04:51:14.000Z',
+      end: '2026-09-03T05:03:36.000Z',
+      source: 'first-and-last-outgoing-npc-damage',
+      manuallyAdjusted: false,
+    },
+    participants: [],
+    calculation: { episodeThresholdSeconds: 180, activeCombatGapSeconds: 30 },
+    metrics: {
+      elapsedSeconds: 742,
+      activeCombatSeconds: 694,
+      idleSeconds: 48,
+      fleetDamageDealt: 0,
+      averageFleetDps: 0,
+      activeFleetDps: 0,
+      damageTaken: 0,
+      remoteRepairDelivered: 0,
+      participantCount: 0,
+    },
+    characterMetrics: [],
+    coverage: {
+      logFiles: 0,
+      participantsWithOutgoingDamage: 0,
+      unparsedCombatLines: 0,
+      ambiguousEventsExcluded: 0,
+      repairPairing: 'none' as const,
+    },
+    notes: null,
+    fingerprint: 'abc123',
+    createdAt: '2026-09-03T05:05:12.000Z',
+    updatedAt: '2026-09-03T05:05:12.000Z',
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Existing brief-mandated test (preserved verbatim)
@@ -270,5 +313,37 @@ describe('CharacterMetricsSchema', () => {
         legacyField: 'oops',
       }),
     ).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RunSummary.id — must be a single safe path segment (no traversal)
+// ---------------------------------------------------------------------------
+describe('RunSummarySchema.id path-segment safety', () => {
+  it('accepts a normally-generated id (datetime + site key)', () => {
+    const parsed = RunSummarySchema.parse(minimalRunSummaryFields('2026-09-03T045114Z-core-bastion'));
+    expect(parsed.id).toBe('2026-09-03T045114Z-core-bastion');
+  });
+
+  it('rejects an id containing a path-traversal segment', () => {
+    expect(() => RunSummarySchema.parse(minimalRunSummaryFields('../../outside-archive'))).toThrow();
+  });
+
+  it('rejects an id containing a path separator', () => {
+    expect(() => RunSummarySchema.parse(minimalRunSummaryFields('sub/dir'))).toThrow();
+  });
+
+  it('rejects an id that is exactly "." or ".."', () => {
+    expect(() => RunSummarySchema.parse(minimalRunSummaryFields('.'))).toThrow();
+    expect(() => RunSummarySchema.parse(minimalRunSummaryFields('..'))).toThrow();
+  });
+
+  it('rejects an id starting with a dot (would collide with reserved/hidden archive entries)', () => {
+    expect(() => RunSummarySchema.parse(minimalRunSummaryFields('.hidden-id'))).toThrow();
+  });
+
+  it('RUN_ID_PATTERN agrees with the schema for both an accepted and a rejected id', () => {
+    expect(RUN_ID_PATTERN.test('2026-09-03T045114Z-core-bastion')).toBe(true);
+    expect(RUN_ID_PATTERN.test('../../outside-archive')).toBe(false);
   });
 });
