@@ -53,13 +53,13 @@ function buildLocalRun(overrides: { id: string; windowStart: string; createdAt: 
   };
 }
 
-function buildPublicRun(overrides: { id: string; windowStart: string; comparisonOrder: number }): PublicRunSummary {
+function buildPublicRun(overrides: { id: string; windowStart: string; comparisonOrder: number; siteKey?: string; profileId?: string }): PublicRunSummary {
   const windowEnd = new Date(Date.parse(overrides.windowStart) + 600_000).toISOString();
   return {
     id: overrides.id,
     comparisonOrder: overrides.comparisonOrder,
-    site: { name: 'Core Bastion', key: 'core-bastion' },
-    fleetProfile: { id: 'default-profile', name: 'Default Profile' },
+    site: { name: 'Core Bastion', key: overrides.siteKey ?? 'core-bastion' },
+    fleetProfile: { id: overrides.profileId ?? 'default-profile', name: 'Default Profile' },
     window: { start: overrides.windowStart, end: windowEnd, source: 'outgoing-npc-damage', manuallyAdjusted: false },
     calculation: { episodeThresholdSeconds: 180, activeCombatGapSeconds: 30 },
     metrics: {
@@ -138,6 +138,21 @@ describe('renderHistory date sort tie-break', () => {
     renderHistory(container, [runB, runA], null, () => undefined, sortDate('asc'), () => undefined);
 
     expect(rowOrder(container)).toEqual(['p-a', 'p-b']);
+  });
+
+  it('breaks equal window.start ties across DIFFERENT (site.key, fleetProfile.id) groups by group key, not by id and never by cross-group comparisonOrder', () => {
+    const container = document.createElement('div');
+    // Ids are deliberately the OPPOSITE alphabetical order from the site keys,
+    // so a fallback to (window.start, id) alone -- ignoring group key -- would
+    // produce the wrong order. comparisonOrder is also deliberately opposite
+    // (higher in the group that should sort first) to prove it's never used
+    // across groups either.
+    const lateGroupEarlyId = buildPublicRun({ id: 'aaa-run', windowStart: '2026-09-01T10:00:00.000Z', comparisonOrder: 0, siteKey: 'site-late' });
+    const earlyGroupLateId = buildPublicRun({ id: 'zzz-run', windowStart: '2026-09-01T10:00:00.000Z', comparisonOrder: 99, siteKey: 'site-early' });
+
+    renderHistory(container, [lateGroupEarlyId, earlyGroupLateId], null, () => undefined, sortDate('asc'), () => undefined);
+
+    expect(rowOrder(container)).toEqual(['zzz-run', 'aaa-run']);
   });
 
   it('orders by distinct window.start first, only using the chronology tie-break when dates are equal', () => {

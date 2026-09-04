@@ -1,5 +1,5 @@
 import type { DashboardDataset, DashboardRun } from './data.js';
-import { comparisonOrder } from './compare.js';
+import { groupKeyOf, matchingGroupChronology } from './compare.js';
 
 // ---------------------------------------------------------------------------
 // Filter state
@@ -70,15 +70,62 @@ export function matchingRuns(state: DashboardState): DashboardRun[] {
 }
 
 /**
- * The newest run by comparison chronology — `(createdAt, id)` for local runs
- * and `(comparisonOrder, id)` for public runs. Payload order is never trusted:
- * a local payload is sorted by `window.start` (which can disagree with
- * `createdAt` for a re-analyzed run) and a public payload may arrive in any
- * order at all.
+ * Partitions runs into exact `(site.key, fleetProfile.id)` groups,
+ * preserving first-encounter order both across groups and within each group.
+ */
+function groupByExactMatch(runs: DashboardRun[]): DashboardRun[][] {
+  const groups = new Map<string, DashboardRun[]>();
+  for (const run of runs) {
+    const key = groupKeyOf(run);
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(run);
+    else groups.set(key, [run]);
+  }
+  return Array.from(groups.values());
+}
+
+/**
+ * Orders one-per-group representatives globally: local runs by
+ * `(createdAt, id)`; public runs by `(window.start, id)` since public
+ * payloads intentionally omit createdAt. Unlike `matchingGroupChronology`,
+ * both of these are real total orders that don't restart per group, so
+ * comparing them across groups is safe.
+ */
+function representativeOrder(a: DashboardRun, b: DashboardRun): number {
+  if ('createdAt' in a && 'createdAt' in b) {
+    const cmp = (a as { createdAt: string }).createdAt.localeCompare((b as { createdAt: string }).createdAt);
+    if (cmp !== 0) return cmp;
+    return a.id.localeCompare(b.id);
+  }
+  const cmp = a.window.start.localeCompare(b.window.start);
+  if (cmp !== 0) return cmp;
+  return a.id.localeCompare(b.id);
+}
+
+/**
+ * The globally newest run, deterministic and transitive regardless of
+ * traversal order:
+ *  1. Partition `runs` into exact `(site.key, fleetProfile.id)` groups.
+ *  2. Select each group's newest run using matching-group chronology --
+ *     `(createdAt, id)` for local runs, `(comparisonOrder, id)` for public
+ *     runs -- a real total order within a single group.
+ *  3. Choose the overall newest among the one-per-group representatives by
+ *     `(createdAt, id)` for local runs, or `(window.start, id)` for public
+ *     runs (createdAt is intentionally omitted from public payloads).
+ * Payload order is never trusted at either step. A comparator that used
+ * `comparisonOrder` for same-group pairs but `window.start` for cross-group
+ * pairs was not transitive across three runs, so its "newest" could vary by
+ * array order; partitioning first makes the whole process a single
+ * well-defined total order.
  */
 export function newestRun(runs: DashboardRun[]): DashboardRun | null {
   if (runs.length === 0) return null;
-  return runs.reduce((newest, run) => (comparisonOrder(run, newest) > 0 ? run : newest));
+
+  const representatives = groupByExactMatch(runs).map((group) =>
+    group.reduce((newest, run) => (matchingGroupChronology(run, newest) > 0 ? run : newest)),
+  );
+
+  return representatives.reduce((newest, run) => (representativeOrder(run, newest) > 0 ? run : newest));
 }
 
 /**

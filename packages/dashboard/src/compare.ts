@@ -6,37 +6,77 @@ import type { DashboardRun } from './data.js';
 // ---------------------------------------------------------------------------
 
 /**
- * Comparison order for local runs: `(createdAt, id)`, matching core's
- * `compareMatchingRuns`. Local RunSummary always has createdAt. Public runs
- * have `comparisonOrder` instead, but that ordinal is only meaningful within
- * the same `(site.key, fleetProfile.id)` group -- core's assignComparisonOrder
- * assigns it per group, restarting from 0 in every group. Comparing it across
- * different groups is meaningless (an older group's run can have a higher
- * ordinal than a newer group's), so cross-group public comparisons fall back
- * to `(window.start, id)` -- public payloads intentionally omit createdAt.
+ * Returns the exact `(site.key, fleetProfile.id)` group key for a run. Used
+ * to determine whether `comparisonOrder` (assigned per group by core's
+ * `assignComparisonOrder`, restarting at 0 in every group) is meaningful
+ * between two runs.
  */
-export function comparisonOrder(a: DashboardRun, b: DashboardRun): number {
+export function groupKeyOf(run: DashboardRun): string {
+  return `${run.site.key}\u0000${run.fleetProfile.id}`;
+}
+
+/** Whether two runs belong to the exact same `(site.key, fleetProfile.id)` group. */
+export function sameGroup(a: DashboardRun, b: DashboardRun): boolean {
+  return a.site.key === b.site.key && a.fleetProfile.id === b.fleetProfile.id;
+}
+
+/**
+ * Comparison chronology within a single `(site.key, fleetProfile.id)` group:
+ * `(createdAt, id)` for local runs (matching core's `compareMatchingRuns`),
+ * `(comparisonOrder, id)` for public runs.
+ *
+ * This function may ONLY compare runs from the exact same group -- it throws
+ * otherwise. Public `comparisonOrder` is assigned per group by core's
+ * `assignComparisonOrder`, restarting at 0 in every group, so it is a real
+ * total order ONLY within one group; a run's window.start does not respect
+ * group boundaries either. A comparator that used `(comparisonOrder, id)`
+ * for same-group pairs but fell back to `(window.start, id)` for cross-group
+ * pairs was NOT transitive: three runs could form a cycle (A<B, B<C, but
+ * C<A), so `sort`/`reduce` silently depended on array traversal order.
+ * Throwing on cross-group misuse makes that mistake impossible to make
+ * silently; callers must pre-partition by group first (see
+ * `sameGroupChronologyRuns` below, and `newestRun` in state.ts, which does
+ * exactly that for the whole-dataset case).
+ */
+export function matchingGroupChronology(a: DashboardRun, b: DashboardRun): number {
+  if (!sameGroup(a, b)) {
+    throw new Error(
+      'matchingGroupChronology can only compare runs from the exact same (site.key, fleetProfile.id) group; ' +
+        `got ("${a.site.key}", "${a.fleetProfile.id}") vs ("${b.site.key}", "${b.fleetProfile.id}"). ` +
+        'Partition runs by group before comparing (see sameGroupChronologyRuns / newestRun).',
+    );
+  }
   // Local runs (have createdAt)
   if ('createdAt' in a && 'createdAt' in b) {
     const cmp = (a as { createdAt: string }).createdAt.localeCompare((b as { createdAt: string }).createdAt);
     if (cmp !== 0) return cmp;
     return a.id.localeCompare(b.id);
   }
-  // Public runs (have comparisonOrder), only comparable within the same group.
+  // Public runs (have comparisonOrder)
   if ('comparisonOrder' in a && 'comparisonOrder' in b) {
-    if (a.site.key === b.site.key && a.fleetProfile.id === b.fleetProfile.id) {
-      const cmp = (a as { comparisonOrder: number }).comparisonOrder - (b as { comparisonOrder: number }).comparisonOrder;
-      if (cmp !== 0) return cmp;
-      return a.id.localeCompare(b.id);
-    }
-    const cmp = a.window.start.localeCompare(b.window.start);
+    const cmp = (a as { comparisonOrder: number }).comparisonOrder - (b as { comparisonOrder: number }).comparisonOrder;
     if (cmp !== 0) return cmp;
     return a.id.localeCompare(b.id);
   }
-  // Fallback: window.start + id
+  // Mixed/unexpected shape (should not occur -- a dataset is exclusively
+  // local or public): fall back to window.start + id.
   const cmp = a.window.start.localeCompare(b.window.start);
   if (cmp !== 0) return cmp;
   return a.id.localeCompare(b.id);
+}
+
+/**
+ * Returns the runs from `runs` that share `referenceRun`'s exact
+ * `(site.key, fleetProfile.id)` group, sorted oldest-to-newest by
+ * matching-group chronology. Used to scope the overview's
+ * previous/best/trailing-five comparisons and the default previous-run
+ * comparison to a single valid chronology, even when the active filter
+ * spans multiple groups ("All Sites"/"All Profiles"). Returns an empty array
+ * when there is no reference run.
+ */
+export function sameGroupChronologyRuns(runs: DashboardRun[], referenceRun: DashboardRun | null): DashboardRun[] {
+  if (referenceRun === null) return [];
+  return runs.filter((run) => sameGroup(run, referenceRun)).sort(matchingGroupChronology);
 }
 
 // ---------------------------------------------------------------------------

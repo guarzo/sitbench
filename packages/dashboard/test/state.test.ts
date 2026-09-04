@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LocalDashboardDataset, PublicDashboardDataset, PublicRunSummary } from '../src/data.js';
-import { initializeState, matchingRuns, profileOptions, reconcileSelections, selectedRun, siteOptions } from '../src/state.js';
+import { initializeState, matchingRuns, newestRun, profileOptions, reconcileSelections, selectedRun, siteOptions } from '../src/state.js';
 import type { RunSummary } from '@sitbench/core';
 
 let idCounter = 0;
@@ -211,6 +211,82 @@ describe('initializeState', () => {
 
     expect(state.selectedRunId).toBe('p-b');
     expect(state.filter.siteKey).toBe('site-b');
+  });
+});
+
+describe('newestRun (global, transitive across groups)', () => {
+  it('is deterministic across every input permutation, even for a three-run set that would cycle under a naive same-group-vs-cross-group per-pair comparator', () => {
+    // Reproduces the reported non-transitivity: group1's real newest (by
+    // comparisonOrder, its actual recorded chronology) has an EARLIER
+    // window.start than group1's other run. A naive comparator that uses
+    // comparisonOrder for same-group pairs but window.start for cross-group
+    // pairs forms a cycle here (A<B, B<C, C<A), so the answer used to depend
+    // on array order. The correct model never compares comparisonOrder
+    // across groups, so it can't cycle.
+    const group1EarlyOrdinalLateWindow = buildPublicRun({
+      id: 'group1-ordinal0-late-window',
+      comparisonOrder: 0,
+      windowStart: '2026-09-03T10:00:00.000Z',
+      siteKey: 'site-1',
+      profileId: 'profile-1',
+    });
+    const group1LateOrdinalEarlyWindow = buildPublicRun({
+      id: 'group1-ordinal1-early-window',
+      comparisonOrder: 1,
+      windowStart: '2026-09-01T10:00:00.000Z',
+      siteKey: 'site-1',
+      profileId: 'profile-1',
+    });
+    const group2Only = buildPublicRun({
+      id: 'group2-only',
+      comparisonOrder: 0,
+      windowStart: '2026-09-02T10:00:00.000Z',
+      siteKey: 'site-2',
+      profileId: 'profile-2',
+    });
+    const runs = [group1EarlyOrdinalLateWindow, group1LateOrdinalEarlyWindow, group2Only];
+
+    // group1's representative (by comparisonOrder) is group1LateOrdinalEarlyWindow
+    // (window.start Sept 1). Comparing that representative's window.start
+    // against group2Only's (Sept 2) makes group2Only the global newest.
+    const permutations: PublicRunSummary[][] = [
+      [runs[0]!, runs[1]!, runs[2]!],
+      [runs[2]!, runs[1]!, runs[0]!],
+      [runs[1]!, runs[2]!, runs[0]!],
+      [runs[2]!, runs[0]!, runs[1]!],
+      [runs[0]!, runs[2]!, runs[1]!],
+      [runs[1]!, runs[0]!, runs[2]!],
+    ];
+    for (const permutation of permutations) {
+      expect(newestRun(permutation)?.id).toBe('group2-only');
+    }
+  });
+
+  it("selects each group's true newest run by matching-group chronology (comparisonOrder) as its representative, before comparing representatives across groups by window.start", () => {
+    // Within site-a, the run with the highest comparisonOrder (the group's
+    // real recorded newest) has an EARLIER window.start than its groupmate.
+    // Picking by window.start within the group would wrongly select the
+    // other run.
+    const groupANewestByOrdinal = buildPublicRun({
+      id: 'group-a-ordinal-newest',
+      comparisonOrder: 5,
+      windowStart: '2026-09-01T10:00:00.000Z',
+      siteKey: 'site-a',
+    });
+    const groupAOldestByOrdinal = buildPublicRun({
+      id: 'group-a-ordinal-oldest',
+      comparisonOrder: 0,
+      windowStart: '2026-09-05T10:00:00.000Z',
+      siteKey: 'site-a',
+    });
+    const otherGroup = buildPublicRun({
+      id: 'other-group',
+      comparisonOrder: 0,
+      windowStart: '2026-08-01T10:00:00.000Z',
+      siteKey: 'site-b',
+    });
+
+    expect(newestRun([groupAOldestByOrdinal, groupANewestByOrdinal, otherGroup])?.id).toBe('group-a-ordinal-newest');
   });
 });
 

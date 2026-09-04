@@ -1,5 +1,5 @@
 import type { DashboardRun } from './data.js';
-import { comparisonOrder } from './compare.js';
+import { matchingGroupChronology, sameGroup } from './compare.js';
 import { formatDps, formatElapsed, formatShortDate } from './format.js';
 
 // ---------------------------------------------------------------------------
@@ -23,6 +23,23 @@ const COLUMNS: Array<{ field: SortField; label: string; ariaLabel: string }> = [
   { field: 'participants', label: 'Pilots', ariaLabel: 'Sort by participant count' },
 ];
 
+/**
+ * Deterministic, transitive tie-break for equal `window.start` dates. Two
+ * runs from the exact same `(site.key, fleetProfile.id)` group use their real
+ * matching-group chronology (`comparisonOrder`/`createdAt` + id). Runs from
+ * different groups have no comparable per-group ordinal (`comparisonOrder`
+ * restarts at 0 in every group, and public runs omit `createdAt`), so they're
+ * ordered by group key instead -- deterministic, and independent of any
+ * chronology field, so it can never cycle with the same-group comparisons
+ * above.
+ */
+function equalDateTiebreak(a: DashboardRun, b: DashboardRun): number {
+  if (sameGroup(a, b)) return matchingGroupChronology(a, b);
+  const siteCmp = a.site.key.localeCompare(b.site.key);
+  if (siteCmp !== 0) return siteCmp;
+  return a.fleetProfile.id.localeCompare(b.fleetProfile.id);
+}
+
 function sortRuns(runs: DashboardRun[], sort: HistorySort): DashboardRun[] {
   const sorted = runs.slice();
   const dir = sort.dir === 'asc' ? 1 : -1;
@@ -34,9 +51,10 @@ function sortRuns(runs: DashboardRun[], sort: HistorySort): DashboardRun[] {
         if (cmp === 0) {
           // Payload order is never a stable chronology: break equal-date
           // ties using the same comparison chronology the rest of the
-          // dashboard uses -- (createdAt, id) for local runs, (comparisonOrder,
-          // id) for public runs.
-          cmp = comparisonOrder(a, b);
+          // dashboard uses within a group -- (createdAt, id) for local
+          // runs, (comparisonOrder, id) for public runs -- and fall back
+          // to group key across different groups.
+          cmp = equalDateTiebreak(a, b);
         }
         break;
       case 'elapsed':

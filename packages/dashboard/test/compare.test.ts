@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { alignCharacterRows, bestRunUpTo, comparisonOrder, previousRun, trailingFiveAverage, trailingFiveRuns } from '../src/compare.js';
+import { alignCharacterRows, bestRunUpTo, matchingGroupChronology, previousRun, sameGroupChronologyRuns, trailingFiveAverage, trailingFiveRuns } from '../src/compare.js';
 import { compareMatchingRuns, type CharacterMetrics, type RunSummary } from '@sitbench/core';
 import type { DashboardRun, PublicRunSummary } from '../src/data.js';
 
@@ -228,7 +228,7 @@ describe('alignCharacterRows', () => {
   });
 });
 
-describe('comparisonOrder for local runs', () => {
+describe('matchingGroupChronology for local runs', () => {
   it('sorts by createdAt then id, matching core compareMatchingRuns chronology', () => {
     // Run A was created AFTER run B but has an EARLIER window.start.
     // Core compareMatchingRuns uses createdAt for chronology; dashboard must match.
@@ -247,8 +247,8 @@ describe('comparisonOrder for local runs', () => {
     const coreResult = compareMatchingRuns(runA, [runA, runB]);
     expect(coreResult.previous?.id).toBe(runB.id);
 
-    // Dashboard comparisonOrder must produce the same ordering
-    const ordered = [runA, runB].sort(comparisonOrder);
+    // Dashboard matchingGroupChronology must produce the same ordering
+    const ordered = [runA, runB].sort(matchingGroupChronology);
     expect(ordered[0]!.id).toBe(runB.id);
     expect(ordered[1]!.id).toBe(runA.id);
 
@@ -257,20 +257,28 @@ describe('comparisonOrder for local runs', () => {
   });
 });
 
-describe('comparisonOrder for public runs', () => {
+describe('matchingGroupChronology for public runs', () => {
   it('orders same-group public runs by comparisonOrder, matching the assignComparisonOrder chronology within a (site.key, fleetProfile.id) group', () => {
     const later = buildPublicRun({ id: 'p-later', comparisonOrder: 5, windowStart: '2026-09-01T10:00:00.000Z' });
     const earlier = buildPublicRun({ id: 'p-earlier', comparisonOrder: 1, windowStart: '2026-09-02T10:00:00.000Z' });
 
-    const ordered = [later, earlier].sort(comparisonOrder);
+    const ordered = [later, earlier].sort(matchingGroupChronology);
     expect(ordered.map((r) => r.id)).toEqual(['p-earlier', 'p-later']);
   });
 
-  it('does NOT compare comparisonOrder across different (site.key, fleetProfile.id) groups -- it restarts per group, so a high ordinal in an older group must not beat a low ordinal in a newer group', () => {
-    // Mirrors the reported regression: an August group's last run (comparisonOrder 9)
-    // must not outrank a September group's first run (comparisonOrder 0). Public
-    // payloads intentionally omit createdAt, so cross-group chronology falls back
-    // to (window.start, id).
+  it('breaks equal same-group comparisonOrder ties by id', () => {
+    const runB = buildPublicRun({ id: 'p-b', comparisonOrder: 5, windowStart: '2026-09-01T10:00:00.000Z' });
+    const runA = buildPublicRun({ id: 'p-a', comparisonOrder: 5, windowStart: '2026-09-01T10:00:00.000Z' });
+
+    const ordered = [runB, runA].sort(matchingGroupChronology);
+    expect(ordered.map((r) => r.id)).toEqual(['p-a', 'p-b']);
+  });
+
+  it('throws when asked to compare runs from different (site.key, fleetProfile.id) groups -- comparisonOrder restarts per group, so cross-group use must be impossible, not silently wrong', () => {
+    // Mirrors the reported regression: an August group's run (comparisonOrder 9)
+    // must never be compared directly against a September group's run
+    // (comparisonOrder 0) using this function -- misuse must be loud, not
+    // silently fall back to something that can form a non-transitive cycle.
     const augustGroupOrder9 = buildPublicRun({
       id: 'p-august-order9',
       comparisonOrder: 9,
@@ -286,18 +294,31 @@ describe('comparisonOrder for public runs', () => {
       profileId: 'profile-b',
     });
 
-    expect(comparisonOrder(augustGroupOrder9, septemberGroupOrder0)).toBeLessThan(0);
-    expect(comparisonOrder(septemberGroupOrder0, augustGroupOrder9)).toBeGreaterThan(0);
+    expect(() => matchingGroupChronology(augustGroupOrder9, septemberGroupOrder0)).toThrow(/exact same/);
+    expect(() => [augustGroupOrder9, septemberGroupOrder0].sort(matchingGroupChronology)).toThrow(/exact same/);
+  });
+});
 
-    const ordered = [augustGroupOrder9, septemberGroupOrder0].sort(comparisonOrder);
-    expect(ordered.map((r) => r.id)).toEqual(['p-august-order9', 'p-september-order0']);
+describe('sameGroupChronologyRuns', () => {
+  it("returns only the runs sharing the reference run's exact group, sorted by matching-group chronology, ignoring runs from other groups in the broader (e.g. All Sites/All Profiles filtered) input", () => {
+    const refGroupOlder = buildPublicRun({ id: 'ref-older', comparisonOrder: 0, windowStart: '2026-09-01T10:00:00.000Z', siteKey: 'site-a', profileId: 'profile-a' });
+    const refGroupNewer = buildPublicRun({ id: 'ref-newer', comparisonOrder: 1, windowStart: '2026-09-02T10:00:00.000Z', siteKey: 'site-a', profileId: 'profile-a' });
+    const otherGroupRun = buildPublicRun({ id: 'other-group', comparisonOrder: 99, windowStart: '2026-09-03T10:00:00.000Z', siteKey: 'site-b', profileId: 'profile-b' });
+
+    const result = sameGroupChronologyRuns([otherGroupRun, refGroupNewer, refGroupOlder], refGroupNewer);
+
+    expect(result.map((r) => r.id)).toEqual(['ref-older', 'ref-newer']);
   });
 
-  it('breaks equal cross-group window.start ties by id', () => {
-    const runB = buildPublicRun({ id: 'p-b', comparisonOrder: 5, windowStart: '2026-09-01T10:00:00.000Z', siteKey: 'site-b' });
-    const runA = buildPublicRun({ id: 'p-a', comparisonOrder: 0, windowStart: '2026-09-01T10:00:00.000Z', siteKey: 'site-a' });
+  it('returns an empty array when there is no reference run', () => {
+    const run = buildPublicRun({ id: 'r', comparisonOrder: 0, windowStart: '2026-09-01T10:00:00.000Z' });
+    expect(sameGroupChronologyRuns([run], null)).toEqual([]);
+  });
 
-    const ordered = [runB, runA].sort(comparisonOrder);
-    expect(ordered.map((r) => r.id)).toEqual(['p-a', 'p-b']);
+  it('never throws even when the input spans multiple groups, because it filters to the reference group before ever comparing', () => {
+    const refGroupRun = buildPublicRun({ id: 'ref-run', comparisonOrder: 0, windowStart: '2026-09-01T10:00:00.000Z', siteKey: 'site-a' });
+    const otherGroupRun = buildPublicRun({ id: 'other-group-run', comparisonOrder: 9, windowStart: '2026-08-01T10:00:00.000Z', siteKey: 'site-b' });
+
+    expect(() => sameGroupChronologyRuns([otherGroupRun, refGroupRun], refGroupRun)).not.toThrow();
   });
 });

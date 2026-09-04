@@ -1,5 +1,5 @@
 import { DatasetSchemaError, loadDataset, type DashboardDataset, type DashboardRun } from './data.js';
-import { comparisonOrder } from './compare.js';
+import { sameGroupChronologyRuns } from './compare.js';
 import { renderCompare } from './compare-view.js';
 import { renderDetail } from './detail.js';
 import { renderHistory, type SortDir, type SortField } from './history.js';
@@ -155,10 +155,15 @@ function update(): void {
   // Reconcile selections with matched set
   reconcileSelections(state);
 
-  // Comparison-ordered runs: (createdAt, id) for local, (comparisonOrder, id) for public
-  const comparisonSorted = matched.slice().sort(comparisonOrder);
-
   const currentSel = selectedRun(state);
+
+  // Overview previous/best/trailing-five and the default previous comparison
+  // must only ever compare runs sharing the selected run's EXACT
+  // (site.key, fleetProfile.id) group -- even when the active filter is
+  // "All Sites"/"All Profiles" and `matched` spans multiple groups. Trend and
+  // history intentionally keep showing the broader `matched` result.
+  const comparisonSorted = sameGroupChronologyRuns(matched, currentSel);
+
   const selCompIdx = currentSel !== null ? comparisonSorted.findIndex((r) => r.id === currentSel.id) : -1;
   // Trend chart uses dataset natural order (window.start)
   const selTrendIdx = currentSel !== null ? matched.findIndex((r) => r.id === currentSel.id) : -1;
