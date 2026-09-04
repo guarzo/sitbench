@@ -547,15 +547,12 @@ describe('acquireLock (lock directory + per-owner marker)', () => {
     await release();
   });
 
-  it('leaves an empty (but harmless) lock directory behind if the marker write fails before the marker file is ever created — documented safety tradeoff', async () => {
-    // If cleanup instead removed the directory unconditionally here, it
-    // could just as easily destroy a legitimate replacement's directory in
-    // the narrow window described by the two race tests above. Requiring a
-    // successful `unlink` of our own marker before ever attempting `rmdir`
-    // means this specific edge case (a failure so early that our marker was
-    // never created) is left as a stale, empty, manually-recoverable
-    // directory instead — the same manual recovery already documented for
-    // any stale lock.
+  it('does not leak an empty lock directory when the marker write fails before the marker file is ever created', async () => {
+    // Unlike normal release (which requires a successful unlink of this
+    // acquisition's own marker before ever attempting rmdir), failed-setup
+    // cleanup must always attempt rmdir so the directory this acquisition
+    // itself created via mkdir is never left behind, permanently blocking
+    // later operations.
     const failBeforeCreatingAnything = async (): Promise<void> => {
       throw new Error('simulated failure before the marker file exists');
     };
@@ -564,13 +561,60 @@ describe('acquireLock (lock directory + per-owner marker)', () => {
       'simulated failure before the marker file exists',
     );
 
-    const lockDirEntries = await readdir(path.join(archiveDir, '.lock'));
-    expect(lockDirEntries).toEqual([]);
-    await expect(acquireLock(archiveDir)).rejects.toThrow(ArchiveLockedError);
+    // The failed acquisition's own (still-empty) directory must be fully
+    // removed — no manual recovery required.
+    const lockDirGone = await stat(path.join(archiveDir, '.lock')).then(
+      () => false,
+      () => true,
+    );
+    expect(lockDirGone).toBe(true);
 
-    // Manual recovery (as for any stale lock): remove the empty directory,
-    // then acquisition succeeds normally again.
-    await rm(path.join(archiveDir, '.lock'), { recursive: true, force: true });
+    // A subsequent, real acquisition succeeds normally, immediately.
+    const release = await acquireLock(archiveDir);
+    await release();
+  });
+
+  it('removes a still-empty replacement directory raced during failed-setup cleanup, so that replacement cannot then proceed as owner', async () => {
+    // Reproduces the specific race the required design accepts: a
+    // "replacement" acquisition's mkdir has succeeded (an empty lock
+    // directory now exists) but its own marker has not yet been written
+    // when a *different*, failing acquisition's cleanup runs. Because
+    // failed-setup cleanup always attempts rmdir (not gated on this
+    // acquisition's own unlink succeeding), it removes that still-empty
+    // directory. The replacement's subsequent marker-write attempt must
+    // then fail, and it must never be treated as having acquired the lock.
+    let replacementMarkerPath: string | undefined;
+
+    const failingWriteThatRacesAnEmptyReplacement = async (markerPath: string): Promise<void> => {
+      const lockDir = path.dirname(markerPath);
+      // An operator manually removes what they believe is a stale
+      // (marker-less) lock directory; a different, legitimate process's
+      // `mkdir` immediately succeeds on the now-empty path — but that
+      // replacement has not yet gotten around to writing its own marker.
+      await rm(lockDir, { recursive: true, force: true });
+      await mkdir(lockDir);
+      replacementMarkerPath = path.join(lockDir, 'replacement-owner-token');
+      throw new Error('simulated marker-write failure racing an empty replacement');
+    };
+
+    await expect(acquireLock(archiveDir, failingWriteThatRacesAnEmptyReplacement)).rejects.toThrow(
+      'simulated marker-write failure racing an empty replacement',
+    );
+
+    // The replacement's directory must be gone: it was still empty (its own
+    // marker not yet written) when our failed-setup cleanup's unconditional
+    // rmdir ran, so rmdir succeeded.
+    const lockDirGone = await stat(path.join(archiveDir, '.lock')).then(
+      () => false,
+      () => true,
+    );
+    expect(lockDirGone).toBe(true);
+
+    // The replacement's own marker-write attempt, finishing "for real" now,
+    // must fail — proving it never proceeds as the lock's owner.
+    await expect(open(replacementMarkerPath as string, 'wx')).rejects.toThrow();
+
+    // Recovery: a fresh acquisition still succeeds normally afterward.
     const release = await acquireLock(archiveDir);
     await release();
   });

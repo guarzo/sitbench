@@ -156,8 +156,9 @@ async function defaultWriteMarker(markerPath: string): Promise<void> {
 /**
  * Removes only this acquisition's own marker file, and — only if that
  * `unlink` succeeds — attempts a non-recursive `rmdir` of the lock
- * directory. Never uses recursive or forced removal, and never touches a
- * marker or directory this acquisition does not own:
+ * directory. Used for **normal release** of a successfully-acquired lock.
+ * Never uses recursive or forced removal, and never touches a marker or
+ * directory this acquisition does not own:
  *
  *  - If our marker is already gone (`ENOENT`) — whether it was never
  *    created, we already released, or the entire lock directory was
@@ -195,6 +196,53 @@ async function releaseMarker(lockDir: string, markerPath: string): Promise<void>
 }
 
 /**
+ * Cleans up after **this acquisition's own setup has just failed** (the
+ * marker write threw after `mkdir` already succeeded). Unlike
+ * `releaseMarker` (normal release of a lock this acquisition actually
+ * holds), the `rmdir` attempt here is never gated on the preceding `unlink`
+ * succeeding: the marker is removed on a strictly best-effort basis (it may
+ * never have been created at all), and a non-recursive `rmdir` is *always*
+ * attempted afterward. Without this, an acquisition whose marker write
+ * fails before the marker file ever exists would leave the directory it
+ * created via `mkdir` behind forever — `releaseMarker`'s unlink-gate would
+ * never fire, since there is no marker of ours to successfully unlink —
+ * permanently blocking every later acquisition.
+ *
+ * This remains safe against a replacement owner, exactly because `rmdir`
+ * itself refuses to remove a non-empty directory:
+ *
+ *  - If a different, legitimate acquisition has since fully completed its
+ *    own marker write inside this directory, `rmdir` fails with `ENOTEMPTY`
+ *    and the replacement's directory and marker are left completely
+ *    intact.
+ *  - If a different acquisition's `mkdir` succeeded but its own marker
+ *    write has not yet completed (the directory was manually removed and
+ *    recreated while still transiently empty), `rmdir` can succeed here and
+ *    remove it. This is intentional and safe: a marker is only considered
+ *    created after write+sync+close complete, so that replacement's own
+ *    subsequent marker-write attempt then fails (its directory no longer
+ *    exists) and it correctly never proceeds as owner — the same invariant
+ *    that governs every acquisition.
+ */
+async function cleanupFailedAcquisition(lockDir: string, markerPath: string): Promise<void> {
+  try {
+    await unlink(markerPath);
+  } catch {
+    // Best-effort only: the marker may never have been created. Unlike
+    // `releaseMarker`, this is never a reason to skip the rmdir below.
+  }
+
+  try {
+    await rmdir(lockDir);
+  } catch (error) {
+    if (isErrnoException(error) && (error.code === 'ENOTEMPTY' || error.code === 'ENOENT')) {
+      return;
+    }
+    throw error;
+  }
+}
+
+/**
  * Acquires an archive-local exclusive lock via an atomically-created
  * `.lock` *directory* containing a single marker file uniquely named after
  * this acquisition's random token. Directory creation (`mkdir`,
@@ -206,16 +254,15 @@ async function releaseMarker(lockDir: string, markerPath: string): Promise<void>
  * from under this acquisition before the marker could be written), the
  * marker is never created and this acquisition never proceeds as owner.
  *
- * Release (and setup-failure cleanup) delegates to `releaseMarker`, which
- * unlinks only this acquisition's own marker and only then attempts to
- * remove the directory — see its documentation for why this is safe against
- * a replacement owner. Note the accepted tradeoff: if the marker write fails
- * before the marker file was ever created on disk, `unlink` cannot confirm
- * ownership, so the (now genuinely empty) directory is deliberately left
- * behind rather than risk removing a legitimate replacement's directory in
- * the narrow window such a removal could otherwise race against — it simply
- * becomes an ordinary stale lock requiring the same manual recovery as any
- * other. Never uses recursive or forced removal of the lock directory.
+ * Release uses `releaseMarker`, which unlinks only this acquisition's own
+ * marker and only then attempts to remove the directory — see its
+ * documentation for why this is safe against a replacement owner.
+ * Setup-failure cleanup (the marker write itself throwing) instead uses
+ * `cleanupFailedAcquisition`, which always attempts `rmdir` regardless of
+ * whether this acquisition's own marker ever existed — see its
+ * documentation for why this still cannot remove a replacement's directory
+ * once that replacement's own marker exists. Neither path ever uses
+ * recursive or forced removal of the lock directory.
  *
  * `writeMarker` is an injectable seam (defaulting to `defaultWriteMarker`)
  * purely so a setup failure between directory creation and marker
@@ -249,10 +296,12 @@ export async function acquireLock(
     await writeMarker(markerPath);
   } catch (error) {
     // Setup failed after we exclusively created the lock directory. Clean up
-    // only via `releaseMarker` (never a blind recursive/forced removal of
-    // the directory), so a replacement owner that raced in while our
-    // marker write was failing is never disturbed.
-    await releaseMarker(lockDir, markerPath);
+    // via `cleanupFailedAcquisition` (never a blind recursive/forced removal
+    // of the directory), so a replacement owner that has already completed
+    // its own marker write while ours was failing is never disturbed, while
+    // still reclaiming this acquisition's own directory when nothing else
+    // has claimed it.
+    await cleanupFailedAcquisition(lockDir, markerPath);
     throw error;
   }
 
