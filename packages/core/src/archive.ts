@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { FileHandle } from 'node:fs/promises';
-import { mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rename, rm, rmdir, stat, unlink } from 'node:fs/promises';
 import * as path from 'node:path';
 import { z } from 'zod';
 import { canonicalKey } from './canonicalize.js';
@@ -16,7 +15,7 @@ import {
   type RunSummary,
 } from './schemas.js';
 
-const LOCK_FILE_NAME = '.lock';
+const LOCK_DIR_NAME = '.lock';
 const TMP_PREFIX = '.tmp-';
 
 export class DuplicateRunError extends Error {}
@@ -143,83 +142,121 @@ export async function writeRunDirectoryAtomic(
   }
 }
 
+/** Creates the marker file at `markerPath`, flushing and closing it before returning. */
+async function defaultWriteMarker(markerPath: string): Promise<void> {
+  const handle = await open(markerPath, 'wx');
+  try {
+    await handle.writeFile(String(process.pid), 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
 /**
- * Acquires an archive-local exclusive lock by atomically creating a lock
- * file (`open(..., 'wx')` fails with EEXIST if one already exists). A
- * competing writer fails clearly and immediately rather than spin-waiting or
- * racing; a held lock is never force-broken.
+ * Removes only this acquisition's own marker file, and — only if that
+ * `unlink` succeeds — attempts a non-recursive `rmdir` of the lock
+ * directory. Never uses recursive or forced removal, and never touches a
+ * marker or directory this acquisition does not own:
  *
- * The lock file's content is an ownership token (a fresh UUID) unique to
- * this acquisition. The returned release function only removes the lock
- * file if it still contains that exact token — if the lock file was
- * manually removed and then re-created by a different acquisition (e.g. an
- * operator recovering from what they believed was a stale lock, followed by
- * another process legitimately acquiring it), releasing the original
- * acquisition must never delete the replacement lock out from under its
- * new owner.
+ *  - If our marker is already gone (`ENOENT`) — whether it was never
+ *    created, we already released, or the entire lock directory was
+ *    manually removed and possibly replaced by a different, legitimate
+ *    owner — there is nothing more to do. A replacement owner's directory
+ *    and marker (if any) are left completely untouched: this is what makes
+ *    release TOCTOU-safe, since there is no separate "read the current
+ *    owner, then decide whether to delete" step to race against — the
+ *    filesystem's own `unlink`-by-exact-name is the atomic check.
+ *  - If our marker existed and we just removed it, the directory should now
+ *    be empty (the exclusive `mkdir` at acquisition time guarantees no other
+ *    owner could have created a marker while our directory persisted), so
+ *    `rmdir` cleans it up. If `rmdir` fails (`ENOTEMPTY` because some other
+ *    marker unexpectedly exists, or `ENOENT` because it is already gone),
+ *    that is left alone rather than forced.
+ */
+async function releaseMarker(lockDir: string, markerPath: string): Promise<void> {
+  try {
+    await unlink(markerPath);
+  } catch (error) {
+    if (isErrnoException(error) && error.code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+
+  try {
+    await rmdir(lockDir);
+  } catch (error) {
+    if (isErrnoException(error) && (error.code === 'ENOTEMPTY' || error.code === 'ENOENT')) {
+      return;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Acquires an archive-local exclusive lock via an atomically-created
+ * `.lock` *directory* containing a single marker file uniquely named after
+ * this acquisition's random token. Directory creation (`mkdir`,
+ * non-recursive) is the sole exclusivity gate: it fails with `EEXIST` if a
+ * lock directory already exists, so a competing writer fails clearly and
+ * immediately rather than spin-waiting or racing. Acquisition is only
+ * considered complete once the marker file has been written, synced, and
+ * closed; if that fails (including because the directory was removed out
+ * from under this acquisition before the marker could be written), the
+ * marker is never created and this acquisition never proceeds as owner.
  *
- * If writing/syncing/closing the lock file's token fails after the file was
- * successfully created, the just-created lock file is removed before
- * rethrowing so a failed acquisition never leaks a lock. `writeLockMetadata`
- * is an injectable seam (defaulting to the real implementation) purely so
- * this failure path can be exercised deterministically in tests; production
+ * Release (and setup-failure cleanup) delegates to `releaseMarker`, which
+ * unlinks only this acquisition's own marker and only then attempts to
+ * remove the directory — see its documentation for why this is safe against
+ * a replacement owner. Note the accepted tradeoff: if the marker write fails
+ * before the marker file was ever created on disk, `unlink` cannot confirm
+ * ownership, so the (now genuinely empty) directory is deliberately left
+ * behind rather than risk removing a legitimate replacement's directory in
+ * the narrow window such a removal could otherwise race against — it simply
+ * becomes an ordinary stale lock requiring the same manual recovery as any
+ * other. Never uses recursive or forced removal of the lock directory.
+ *
+ * `writeMarker` is an injectable seam (defaulting to `defaultWriteMarker`)
+ * purely so a setup failure between directory creation and marker
+ * completion can be exercised deterministically in tests; production
  * callers never override it.
  *
  * Callers must release the returned function in a `finally` block.
  */
 export async function acquireLock(
   archiveDir: string,
-  writeLockMetadata: (handle: FileHandle, token: string) => Promise<void> = async (handle, token) => {
-    await handle.writeFile(token, 'utf8');
-    await handle.sync();
-  },
+  writeMarker: (markerPath: string) => Promise<void> = defaultWriteMarker,
 ): Promise<() => Promise<void>> {
   await mkdir(archiveDir, { recursive: true });
-  const lockPath = path.join(archiveDir, LOCK_FILE_NAME);
+  const lockDir = path.join(archiveDir, LOCK_DIR_NAME);
   const token = randomUUID();
+  const markerPath = path.join(lockDir, token);
 
-  let handle: FileHandle;
   try {
-    handle = await open(lockPath, 'wx');
+    await mkdir(lockDir);
   } catch (error) {
     if (isErrnoException(error) && error.code === 'EEXIST') {
       throw new ArchiveLockedError(
-        `Archive at "${archiveDir}" is locked by another process (lock file present at "${lockPath}"). ` +
-          'If no other sitbench process is running, remove the lock file manually and retry.',
+        `Archive at "${archiveDir}" is locked by another process (lock directory present at "${lockDir}"). ` +
+          'If no other sitbench process is running, remove the lock directory manually and retry.',
       );
     }
     throw error;
   }
 
   try {
-    try {
-      await writeLockMetadata(handle, token);
-    } finally {
-      await handle.close();
-    }
+    await writeMarker(markerPath);
   } catch (error) {
-    // Setup failed after we exclusively created the lock file: we know we
-    // own it (no one else could have), so clean it up rather than leak it.
-    await rm(lockPath, { force: true });
+    // Setup failed after we exclusively created the lock directory. Clean up
+    // only via `releaseMarker` (never a blind recursive/forced removal of
+    // the directory), so a replacement owner that raced in while our
+    // marker write was failing is never disturbed.
+    await releaseMarker(lockDir, markerPath);
     throw error;
   }
 
-  return async () => {
-    let currentToken: string;
-    try {
-      currentToken = await readFile(lockPath, 'utf8');
-    } catch (error) {
-      if (isErrnoException(error) && error.code === 'ENOENT') {
-        return; // Already gone (e.g. manually removed); nothing to clean up.
-      }
-      throw error;
-    }
-    if (currentToken === token) {
-      await rm(lockPath, { force: true });
-    }
-    // Else: the lock file has since been replaced by a different owner.
-    // Never delete a lock we do not currently own.
-  };
+  return () => releaseMarker(lockDir, markerPath);
 }
 
 function toCatalogEntry(summary: RunSummary): CatalogEntry {

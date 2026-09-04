@@ -147,15 +147,13 @@ describe('fingerprintRun', () => {
     expect(fingerprintRun([], win)).toBe(fingerprintRun([], win));
   });
 
-  it('sorts by strict code-unit comparison, not locale-aware collation (environment-independent digest)', () => {
-    // `String.prototype.localeCompare` alphabetizes case-insensitively-ish,
-    // so "alpha" conventionally sorts before "Zulu". Strict code-unit
-    // comparison sorts the other way: 'Z' is U+005A (90) and 'a' is U+0061
-    // (97), so "Zulu" sorts first. A fingerprint must hash identically on
-    // every machine regardless of its default locale/ICU data, so it must
-    // use code-unit comparison. This test hand-derives the expected sha256
-    // digest assuming code-unit ordering (the "Zulu" record first) without
-    // ever calling `localeCompare` to compute the expectation.
+  it('does not depend on String.prototype.localeCompare for its sort order (mutation check)', () => {
+    // Hand-derived expected payload: both events are identical except for
+    // `actor` ("Zulu" vs "alpha"), so the JSON.stringify'd records differ
+    // first, and only, at that field. Under strict code-unit ("ordinal")
+    // comparison, 'Z' is U+005A (90) and 'a' is U+0061 (97), so the "Zulu"
+    // record sorts first. This expectation is derived independently of
+    // `localeCompare` — it is never called anywhere to compute it.
     const win = window(0, 50);
     const eventZulu = damageDealt(5, { actor: 'Zulu', sourceLine: 1 });
     const eventAlpha = damageDealt(5, { actor: 'alpha', sourceLine: 1 });
@@ -192,10 +190,29 @@ describe('fingerprintRun', () => {
     // sort itself — not incidental input order — produces this result.
     expect(fingerprintRun([eventAlpha, eventZulu], win)).toBe(expectedDigest);
 
-    // Sanity check: this scenario genuinely distinguishes code-unit order
-    // from this environment's locale-aware collation (if it didn't, the
-    // test above would be unable to detect a regression back to
-    // `localeCompare`).
-    expect('Zulu'.localeCompare('alpha')).toBeGreaterThan(0);
+    // Mutation check: temporarily replace `String.prototype.localeCompare`
+    // with an intentionally wrong collation (every comparison reports
+    // "equal"). If `fingerprintRun` still depended on `localeCompare`
+    // anywhere, `Array#sort`'s stability guarantee (ES2019+) would turn this
+    // into a no-op sort, so the two input orderings below would then
+    // produce two *different* digests (each equal to its own input order)
+    // instead of both still matching the hand-derived expectation. This
+    // proves the real digest behavior is unaffected by `localeCompare`,
+    // regardless of how any particular environment's `localeCompare` itself
+    // behaves — no assertion here depends on that behavior.
+    const originalLocaleCompare = String.prototype.localeCompare;
+    try {
+      String.prototype.localeCompare = function intentionallyWrongCollation(): number {
+        return 0;
+      };
+
+      const afterMutationSameOrder = fingerprintRun([eventAlpha, eventZulu], win);
+      const afterMutationSwappedOrder = fingerprintRun([eventZulu, eventAlpha], win);
+
+      expect(afterMutationSameOrder).toBe(expectedDigest);
+      expect(afterMutationSwappedOrder).toBe(expectedDigest);
+    } finally {
+      String.prototype.localeCompare = originalLocaleCompare;
+    }
   });
 });

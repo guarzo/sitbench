@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -149,9 +149,9 @@ describe('Archive.saveRun', () => {
     expect(topLevelEntries.includes('runs')).toBe(false);
   });
 
-  it('fails clearly when a lock file is already held by another process, without creating a run', async () => {
+  it('fails clearly when a lock directory is already held by another process, without creating a run', async () => {
     await mkdir(archiveDir, { recursive: true });
-    await writeFile(path.join(archiveDir, '.lock'), '999999', 'utf8');
+    await mkdir(path.join(archiveDir, '.lock'));
 
     const archive = new Archive(archiveDir);
     await expect(archive.saveRun(buildSummary(), [buildEvent()])).rejects.toThrow(ArchiveLockedError);
@@ -242,7 +242,7 @@ describe('Archive.loadRun', () => {
     // Simulate a concurrent writer holding the lock (guards against a
     // "mixed generation" read — run.json from one update paired with a stale
     // or in-progress events.jsonl).
-    await writeFile(path.join(archiveDir, '.lock'), '999999', 'utf8');
+    await mkdir(path.join(archiveDir, '.lock'));
 
     await expect(archive.loadRun(summary.id)).rejects.toThrow(ArchiveLockedError);
   });
@@ -458,47 +458,119 @@ describe('writeRunDirectoryAtomic (temp-directory cleanup on failure)', () => {
   });
 });
 
-describe('acquireLock (ownership token)', () => {
-  it('does not delete a replacement lock created by another owner after the original lock file was manually removed', async () => {
+describe('acquireLock (lock directory + per-owner marker)', () => {
+  it('does not delete a replacement lock created by another owner after the original lock directory was manually removed', async () => {
     const release1 = await acquireLock(archiveDir);
 
     // An operator (or another process) removes what it believes is a stale
-    // lock, then a different process legitimately acquires a fresh one.
-    await rm(path.join(archiveDir, '.lock'), { force: true });
+    // lock directory, then a different process legitimately acquires a
+    // fresh one.
+    await rm(path.join(archiveDir, '.lock'), { recursive: true, force: true });
     const release2 = await acquireLock(archiveDir);
 
-    // The original (now-stale) release must NOT delete the replacement lock.
-    await release1();
-    const lockStillPresent = await readFile(path.join(archiveDir, '.lock'), 'utf8').then(
-      () => true,
-      () => false,
-    );
-    expect(lockStillPresent).toBe(true);
+    // While release2 holds the lock, no third acquisition may proceed —
+    // "no two owners proceed" at once.
+    await expect(acquireLock(archiveDir)).rejects.toThrow(ArchiveLockedError);
 
-    // The legitimate owner's release still works normally.
+    // The original (now-stale) release must NOT delete the replacement's
+    // marker or directory.
+    await release1();
+    const lockDirEntriesAfterStaleRelease = await readdir(path.join(archiveDir, '.lock'));
+    expect(lockDirEntriesAfterStaleRelease).toHaveLength(1);
+
+    // The legitimate owner's release still works normally and fully cleans up.
     await release2();
-    const lockGone = await readFile(path.join(archiveDir, '.lock'), 'utf8').then(
+    const lockDirGone = await stat(path.join(archiveDir, '.lock')).then(
       () => false,
       () => true,
     );
-    expect(lockGone).toBe(true);
+    expect(lockDirGone).toBe(true);
   });
 
-  it('cleans up the lock file it created if writing lock metadata fails during acquisition, without leaking it', async () => {
-    const failingWrite = async (): Promise<void> => {
-      throw new Error('simulated lock-metadata write failure');
+  it('does not delete a replacement lock created between a failed marker write and this owner\'s setup-failure cleanup', async () => {
+    let replacementRelease: (() => Promise<void>) | undefined;
+
+    const failingMarkerWriteThatRaces = async (markerPath: string): Promise<void> => {
+      // Simulate: our marker write is about to fail, but before this
+      // acquisition's own cleanup runs, another process notices the
+      // (transiently marker-less) directory, decides it is abandoned,
+      // removes it, and legitimately re-acquires a fresh lock of its own.
+      await rm(path.dirname(markerPath), { recursive: true, force: true });
+      replacementRelease = await acquireLock(archiveDir);
+      throw new Error('simulated marker-write failure');
     };
 
-    await expect(acquireLock(archiveDir, failingWrite)).rejects.toThrow('simulated lock-metadata write failure');
+    await expect(acquireLock(archiveDir, failingMarkerWriteThatRaces)).rejects.toThrow(
+      'simulated marker-write failure',
+    );
 
-    // The failed acquisition must not leave the lock file behind...
-    const lockGoneAfterFailure = await readFile(path.join(archiveDir, '.lock'), 'utf8').then(
+    // The replacement lock (created by the "other process" simulated above)
+    // must still be completely intact: this failed acquisition's cleanup
+    // must not have deleted it — "no two owners proceed", but a subsequent
+    // acquisition attempt while it's held must still fail, and the
+    // replacement's own marker must still be exactly one entry.
+    const lockDirEntries = await readdir(path.join(archiveDir, '.lock'));
+    expect(lockDirEntries).toHaveLength(1);
+    await expect(acquireLock(archiveDir)).rejects.toThrow(ArchiveLockedError);
+
+    // The legitimate replacement owner can still release cleanly.
+    await replacementRelease?.();
+    const lockDirGone = await stat(path.join(archiveDir, '.lock')).then(
       () => false,
       () => true,
     );
-    expect(lockGoneAfterFailure).toBe(true);
+    expect(lockDirGone).toBe(true);
+  });
 
-    // ...so a subsequent real acquisition succeeds rather than hitting a leaked lock.
+  it('cleans up its own marker and the now-empty directory when the failure occurs after the marker file was actually created (e.g. a post-create sync/close failure)', async () => {
+    const writeMarkerThenFailAfterCreatingFile = async (markerPath: string): Promise<void> => {
+      // Simulate: the marker file itself was genuinely created on disk, but
+      // a later step (e.g. fsync) failed.
+      const handle = await open(markerPath, 'wx');
+      await handle.close();
+      throw new Error('simulated post-create marker failure');
+    };
+
+    await expect(acquireLock(archiveDir, writeMarkerThenFailAfterCreatingFile)).rejects.toThrow(
+      'simulated post-create marker failure',
+    );
+
+    // Because our marker genuinely existed on disk, `unlink` succeeds during
+    // cleanup, so the now-empty directory is removed too — nothing leaked.
+    const lockDirGoneAfterFailure = await stat(path.join(archiveDir, '.lock')).then(
+      () => false,
+      () => true,
+    );
+    expect(lockDirGoneAfterFailure).toBe(true);
+
+    const release = await acquireLock(archiveDir);
+    await release();
+  });
+
+  it('leaves an empty (but harmless) lock directory behind if the marker write fails before the marker file is ever created — documented safety tradeoff', async () => {
+    // If cleanup instead removed the directory unconditionally here, it
+    // could just as easily destroy a legitimate replacement's directory in
+    // the narrow window described by the two race tests above. Requiring a
+    // successful `unlink` of our own marker before ever attempting `rmdir`
+    // means this specific edge case (a failure so early that our marker was
+    // never created) is left as a stale, empty, manually-recoverable
+    // directory instead — the same manual recovery already documented for
+    // any stale lock.
+    const failBeforeCreatingAnything = async (): Promise<void> => {
+      throw new Error('simulated failure before the marker file exists');
+    };
+
+    await expect(acquireLock(archiveDir, failBeforeCreatingAnything)).rejects.toThrow(
+      'simulated failure before the marker file exists',
+    );
+
+    const lockDirEntries = await readdir(path.join(archiveDir, '.lock'));
+    expect(lockDirEntries).toEqual([]);
+    await expect(acquireLock(archiveDir)).rejects.toThrow(ArchiveLockedError);
+
+    // Manual recovery (as for any stale lock): remove the empty directory,
+    // then acquisition succeeds normally again.
+    await rm(path.join(archiveDir, '.lock'), { recursive: true, force: true });
     const release = await acquireLock(archiveDir);
     await release();
   });
