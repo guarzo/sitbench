@@ -116,8 +116,16 @@ describe('runEdit', () => {
     expect(reloaded?.summary.createdAt).toBe(summary.createdAt);
   });
 
-  it('changing the window recomputes metrics from archived events and marks the window manually adjusted', async () => {
-    const summary = buildSummary();
+  it('changing the window recomputes metrics from the full archived event stream but never deletes archived events', async () => {
+    const summary = buildSummary({
+      coverage: {
+        logFiles: 2,
+        participantsWithOutgoingDamage: 3,
+        unparsedCombatLines: 5,
+        ambiguousEventsExcluded: 7,
+        repairPairing: 'full',
+      },
+    });
     const events = [
       buildEvent({ sourceLine: 1, timestamp: '2026-09-03T04:51:14.000Z', amount: 100 }),
       buildEvent({ sourceLine: 2, timestamp: '2026-09-03T04:53:14.000Z', amount: 140 }),
@@ -139,14 +147,22 @@ describe('runEdit', () => {
       end: narrowerWindow.end,
       manuallyAdjusted: true,
     });
+    // Metrics are derived by handing the full archived event stream to core
+    // together with the new window; core itself filters by window.
     const expected = calculateRun(
-      events.filter((event) => event.timestamp >= narrowerWindow.start && event.timestamp <= narrowerWindow.end),
+      events,
       { ...narrowerWindow, source: 'manually-adjusted', manuallyAdjusted: true },
       summary.calculation,
     );
     expect(reloaded?.summary.metrics).toEqual(expected.metrics);
     expect(reloaded?.summary.characterMetrics).toEqual(expected.characterMetrics);
     expect(reloaded?.summary.fingerprint).not.toBe(summary.fingerprint);
+    // Coverage is ingestion provenance and is preserved wholesale even though
+    // the window changed.
+    expect(reloaded?.summary.coverage).toEqual(summary.coverage);
+    // The full archived event stream must never be narrowed/deleted, even
+    // though the confirmed window shrank to a subset of it.
+    expect(reloaded?.events).toEqual(events);
   });
 
   it('rejects an edited window with no qualifying outgoing NPC damage and leaves the run untouched', async () => {
@@ -165,6 +181,7 @@ describe('runEdit', () => {
 
     const reloaded = await archive.loadRun(summary.id);
     expect(reloaded?.summary).toEqual(summary);
+    expect(reloaded?.events).toEqual(events);
   });
 
   it('does not persist a change when the final confirmation is declined', async () => {
@@ -253,5 +270,68 @@ describe('runEdit', () => {
     expect(result).toMatchObject({ status: 'fatal', reason: 'incompatible' });
     const rawAfter = await readFile(path.join(runDir, 'run.json'), 'utf8');
     expect(rawAfter).toBe(legacyRunJson);
+  });
+
+  it('detects a concurrent update between load and confirmation and reports a conflict without overwriting it', async () => {
+    const summary = buildSummary();
+    const archive = new Archive(archiveDir);
+    await archive.saveRun(summary, [buildEvent()]);
+
+    const result = await runEdit(
+      { runId: summary.id, archive: archiveDir },
+      {
+        prompts: keepWindowPrompts({
+          requestNotes: async () => 'edited notes',
+          confirmSave: async () => {
+            // Simulate a concurrent process (e.g. another `edit` or
+            // `recalculate`) mutating this exact run after this edit loaded
+            // it but before it confirms/persists its own change.
+            await archive.updateRun(summary.id, ({ summary: current, events }) => ({
+              summary: { ...current, notes: 'concurrent notes' },
+              events,
+            }));
+            return true;
+          },
+        }),
+      },
+    );
+
+    expect(result).toMatchObject({ status: 'fatal', reason: 'conflict' });
+    const reloaded = await archive.loadRun(summary.id);
+    expect(reloaded?.summary.notes).toBe('concurrent notes');
+  });
+
+  it('persists a newly entered fleet profile through Archive.upsertProfile only after confirmation', async () => {
+    const summary = buildSummary();
+    const archive = new Archive(archiveDir);
+    await archive.saveRun(summary, [buildEvent()]);
+
+    const result = await runEdit(
+      { runId: summary.id, archive: archiveDir },
+      { prompts: keepWindowPrompts({ requestProfile: async () => 'Brand New Profile' }) },
+    );
+
+    expect(result).toEqual({ status: 'updated', id: summary.id });
+    const profiles = await archive.loadProfiles();
+    expect(profiles.map((profile) => profile.name)).toContain('Brand New Profile');
+  });
+
+  it('does not persist a newly entered fleet profile when the edit is declined', async () => {
+    const summary = buildSummary();
+    const archive = new Archive(archiveDir);
+    await archive.saveRun(summary, [buildEvent()]);
+
+    await runEdit(
+      { runId: summary.id, archive: archiveDir },
+      {
+        prompts: keepWindowPrompts({
+          requestProfile: async () => 'Should Not Persist',
+          confirmSave: async () => false,
+        }),
+      },
+    );
+
+    const profiles = await archive.loadProfiles();
+    expect(profiles.map((profile) => profile.name)).not.toContain('Should Not Persist');
   });
 });

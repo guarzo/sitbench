@@ -106,13 +106,32 @@ describe('runRecalculate', () => {
     expect(reloaded?.summary.notes).toBe(summary.notes);
     expect(reloaded?.summary.createdAt).toBe(summary.createdAt);
     expect(reloaded?.summary.fingerprint).toBe(summary.fingerprint);
-    expect(reloaded?.summary.coverage.logFiles).toBe(summary.coverage.logFiles);
-    expect(reloaded?.summary.coverage.unparsedCombatLines).toBe(summary.coverage.unparsedCombatLines);
-    expect(reloaded?.summary.coverage.participantsWithOutgoingDamage).toBe(1);
+    // Coverage is ingestion provenance and must be preserved wholesale, not
+    // recomputed from the (differently-scoped) windowed events.
+    expect(reloaded?.summary.coverage).toEqual(summary.coverage);
     expect(reloaded?.summary.metricsVersion).toBe('0.1.0');
     expect(Date.parse(reloaded!.summary.updatedAt)).toBeGreaterThanOrEqual(Date.parse(summary.updatedAt));
 
     expect(output.join('\n')).toContain(`Recalculated run ${summary.id}.`);
+  });
+
+  it('preserves coverage wholesale as ingestion provenance rather than recomputing it from windowed events', async () => {
+    const summary = buildSummary({
+      coverage: {
+        logFiles: 2,
+        participantsWithOutgoingDamage: 3,
+        unparsedCombatLines: 5,
+        ambiguousEventsExcluded: 7,
+        repairPairing: 'full',
+      },
+    });
+    const archive = new Archive(archiveDir);
+    await archive.saveRun(summary, [buildEvent()]);
+
+    await runRecalculate({ runId: summary.id, archive: archiveDir }, { write: () => undefined });
+
+    const reloaded = await archive.loadRun(summary.id);
+    expect(reloaded?.summary.coverage).toEqual(summary.coverage);
   });
 
   it('recalculates every archived run with --all', async () => {
@@ -141,9 +160,58 @@ describe('runRecalculate', () => {
     expect(result).toMatchObject({ status: 'fatal', reason: 'missing-target' });
   });
 
+  it('recalculates every valid run and reports a partial status for a mixed batch under --all', async () => {
+    const archive = new Archive(archiveDir);
+    const validSummary = buildSummary();
+    await archive.saveRun(validSummary, [buildEvent()]);
+
+    // A legacy run whose run.json itself fails the current strict
+    // RunSummarySchema (an extra unknown field) — the exact case that made
+    // `archive.listRuns()` throw and block enumeration of every other run.
+    const legacyDir = path.join(archiveDir, 'runs', 'legacy-run');
+    await mkdir(legacyDir, { recursive: true });
+    const legacyRunJson = { ...buildSummary({ id: 'legacy-run', fingerprint: 'legacy-fingerprint' }), legacyExtraField: 'unsupported' };
+    await writeFile(path.join(legacyDir, 'run.json'), `${JSON.stringify(legacyRunJson, null, 2)}\n`, 'utf8');
+    await writeFile(path.join(legacyDir, 'events.jsonl'), `${JSON.stringify(buildEvent())}\n`, 'utf8');
+
+    const result = await runRecalculate({ all: true, archive: archiveDir }, { write: () => undefined });
+
+    expect(result.status).toBe('partial');
+    if (result.status === 'partial') {
+      expect(result.outcomes).toHaveLength(2);
+      expect(result.outcomes.find((outcome) => outcome.id === validSummary.id)).toMatchObject({
+        status: 'recalculated',
+      });
+      expect(result.outcomes.find((outcome) => outcome.id === 'legacy-run')).toMatchObject({ status: 'incompatible' });
+    }
+
+    // The valid run was still recalculated even though enumeration also found
+    // an incompatible one; the incompatible one's run.json is untouched.
+    const reloadedValid = await archive.loadRun(validSummary.id);
+    expect(reloadedValid?.summary.metricsVersion).toBe('0.1.0');
+  });
+
+  it('reports a partial status when every requested run in a batch is incompatible', async () => {
+    for (const id of ['legacy-one', 'legacy-two']) {
+      const legacyDir = path.join(archiveDir, 'runs', id);
+      await mkdir(legacyDir, { recursive: true });
+      const legacyRunJson = { ...buildSummary({ id, fingerprint: `fp-${id}` }), legacyExtraField: 'unsupported' };
+      await writeFile(path.join(legacyDir, 'run.json'), `${JSON.stringify(legacyRunJson, null, 2)}\n`, 'utf8');
+      await writeFile(path.join(legacyDir, 'events.jsonl'), `${JSON.stringify(buildEvent())}\n`, 'utf8');
+    }
+
+    const result = await runRecalculate({ all: true, archive: archiveDir }, { write: () => undefined });
+
+    expect(result.status).toBe('partial');
+    if (result.status === 'partial') {
+      expect(result.outcomes).toHaveLength(2);
+      expect(result.outcomes.every((outcome) => outcome.status === 'incompatible')).toBe(true);
+    }
+  });
+
   it('reports a not-found outcome without creating anything for an unknown run id', async () => {
     const result = await runRecalculate({ runId: 'does-not-exist', archive: archiveDir }, { write: () => undefined });
-    expect(result).toMatchObject({ status: 'ok', outcomes: [{ id: 'does-not-exist', status: 'not-found' }] });
+    expect(result).toMatchObject({ status: 'partial', outcomes: [{ id: 'does-not-exist', status: 'not-found' }] });
   });
 
   it('reports an incompatible outcome and leaves the run untouched when archived events fail the current strict schema', async () => {
@@ -159,8 +227,8 @@ describe('runRecalculate', () => {
 
     const result = await runRecalculate({ runId: 'legacy-run', archive: archiveDir }, { write: () => undefined });
 
-    expect(result.status).toBe('ok');
-    if (result.status === 'ok') {
+    expect(result.status).toBe('partial');
+    if (result.status === 'partial') {
       expect(result.outcomes).toHaveLength(1);
       expect(result.outcomes[0]).toMatchObject({ id: 'legacy-run', status: 'incompatible' });
     }
@@ -177,8 +245,8 @@ describe('runRecalculate', () => {
 
     const result = await runRecalculate({ runId: summary.id, archive: archiveDir }, { write: () => undefined });
 
-    expect(result.status).toBe('ok');
-    if (result.status === 'ok') {
+    expect(result.status).toBe('partial');
+    if (result.status === 'partial') {
       expect(result.outcomes[0]?.status).toBe('error');
     }
 

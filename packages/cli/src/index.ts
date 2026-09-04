@@ -90,7 +90,10 @@ export async function runCli(argv: string[], dependencies: ProgramDependencies =
   try {
     await program.parseAsync(argv, { from: 'user' });
     const isFatal =
-      analysisResult?.status === 'fatal' || recalculateResult?.status === 'fatal' || editResult?.status === 'fatal';
+      analysisResult?.status === 'fatal' ||
+      recalculateResult?.status === 'fatal' ||
+      recalculateResult?.status === 'partial' ||
+      editResult?.status === 'fatal';
     return isFatal ? 1 : 0;
   } catch (error) {
     if (error instanceof CommanderError) {

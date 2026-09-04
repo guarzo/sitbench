@@ -7,7 +7,6 @@ import {
   canonicalKey,
   type CalculationSettings,
   type CharacterMetrics,
-  type Coverage,
   type FleetProfile,
   type NormalizedEvent,
   type RunMetrics,
@@ -17,6 +16,7 @@ import {
 import { defaultArchiveDir } from './paths.js';
 import {
   METRICS_VERSION,
+  isInWindow,
   isQualifyingNpcDamage,
   isSchemaValidationError,
   isValidWindow,
@@ -56,9 +56,20 @@ interface RecalculatedFieldsForEdit {
   calculation: CalculationSettings;
   metrics: RunMetrics;
   characterMetrics: CharacterMetrics[];
-  coverage: Coverage;
   fingerprint: string;
 }
+
+/**
+ * Thrown by the `Archive.updateRun` updater when the archived run's
+ * `updatedAt` no longer matches the snapshot this edit loaded before
+ * prompting. This is an optimistic-concurrency guard: a concurrent process
+ * (another `edit`, or `recalculate`) may have mutated this exact run while
+ * this edit's user was answering prompts. It is thrown from inside the
+ * updater (never via a direct JSON write) so `Archive.updateRun`'s own lock
+ * and atomic-replace guarantees are what actually prevent the overwrite;
+ * this error only decides whether the replacement is offered at all.
+ */
+class EditConflictError extends Error {}
 
 /**
  * Loads an existing run, prompts for its durable metadata (site, fleet
@@ -67,10 +78,17 @@ interface RecalculatedFieldsForEdit {
  * notes never touches metrics, coverage, `metricsVersion`, or the
  * fingerprint. Changing the confirmed window is only accepted when the
  * adjusted window still contains qualifying outgoing NPC damage among the
- * archived events; a qualifying window change recomputes metrics/coverage
- * from those archived events using the run's recorded calculation
- * thresholds, marks `window.manuallyAdjusted: true`, and recomputes the
- * window-dependent fingerprint.
+ * archived events; a qualifying window change recomputes metrics from those
+ * archived events (the full archived event stream is always preserved —
+ * only the *metrics/fingerprint computation* is windowed, never what gets
+ * persisted) using the run's recorded calculation thresholds, marks
+ * `window.manuallyAdjusted: true`, and recomputes the window-dependent
+ * fingerprint. Coverage is ingestion provenance and is never recomputed by
+ * an edit. If the run was mutated by another process after this edit loaded
+ * it, the update is rejected as a conflict rather than silently overwriting
+ * that concurrent change. A newly entered fleet profile is persisted via
+ * `Archive.upsertProfile` only once the edit is confirmed and successfully
+ * written.
  */
 export async function runEdit(arguments_: EditArguments, dependencies: EditDependencies): Promise<EditResult> {
   const write = dependencies.write ?? console.log;
@@ -102,6 +120,7 @@ export async function runEdit(arguments_: EditArguments, dependencies: EditDepen
     return fatal(write, `Run "${runId}" was not found.`, 'not-found');
   }
   const { summary: current, events } = loaded;
+  const loadedUpdatedAt = current.updatedAt;
 
   let profiles: FleetProfile[];
   try {
@@ -122,7 +141,6 @@ export async function runEdit(arguments_: EditArguments, dependencies: EditDepen
   const windowChoice = await dependencies.prompts.requestWindow(current.window);
 
   let window = current.window;
-  let finalEvents = events;
   let recalculated: RecalculatedFieldsForEdit | null = null;
 
   if (windowChoice.action === 'adjust') {
@@ -139,17 +157,18 @@ export async function runEdit(arguments_: EditArguments, dependencies: EditDepen
         'invalid-window',
       );
     }
-    const fields = recalculateFields(candidateWindow, events, current.calculation, current.coverage);
-    if (!fields.events.some(isQualifyingNpcDamage)) {
+    if (!events.some((event) => isInWindow(event, candidateWindow) && isQualifyingNpcDamage(event))) {
       return fatal(write, 'The adjusted window contains no qualifying outgoing NPC damage.', 'no-qualifying-damage');
     }
+    // The full archived event stream (`events`) is handed to core alongside
+    // the new window; core filters internally. Nothing narrower than the
+    // complete archived stream is ever computed from or persisted here.
+    const fields = recalculateFields(candidateWindow, events, current.calculation);
     window = candidateWindow;
-    finalEvents = fields.events;
     recalculated = {
       calculation: fields.calculation,
       metrics: fields.metrics,
       characterMetrics: fields.characterMetrics,
-      coverage: fields.coverage,
       fingerprint: fields.fingerprint,
     };
   }
@@ -169,7 +188,6 @@ export async function runEdit(arguments_: EditArguments, dependencies: EditDepen
           metrics: recalculated.metrics,
           characterMetrics: recalculated.characterMetrics,
           participants: recalculated.characterMetrics.map((metric) => metric.character),
-          coverage: recalculated.coverage,
           metricsVersion: METRICS_VERSION,
           fingerprint: recalculated.fingerprint,
         }),
@@ -181,8 +199,21 @@ export async function runEdit(arguments_: EditArguments, dependencies: EditDepen
   }
 
   try {
-    await archive.updateRun(runId, () => ({ summary: pending, events: finalEvents }));
+    await archive.updateRun(runId, ({ summary: latest, events: latestEvents }) => {
+      if (latest.updatedAt !== loadedUpdatedAt) {
+        throw new EditConflictError(
+          `Run "${runId}" was modified by another process after this edit began; the concurrent change was not overwritten.`,
+        );
+      }
+      // Always persist the full archived event stream this edit loaded
+      // (which, thanks to the conflict check above, is guaranteed to still
+      // be current) — never a window-narrowed subset.
+      return { summary: pending, events: latestEvents };
+    });
   } catch (error) {
+    if (error instanceof EditConflictError) {
+      return fatal(write, error.message, 'conflict');
+    }
     if (error instanceof RunNotFoundError) {
       return fatal(write, `Run "${runId}" was not found.`, 'not-found');
     }
@@ -206,7 +237,14 @@ export async function runEdit(arguments_: EditArguments, dependencies: EditDepen
     return fatal(write, `Run was not updated: ${message(error)}`, 'archive');
   }
 
-  await (dependencies.rebuildCatalog ?? rebuildCatalogNoop)(archive);
+  try {
+    await archive.upsertProfile(profileName);
+    await (dependencies.rebuildCatalog ?? rebuildCatalogNoop)(archive);
+  } catch (error) {
+    write(`Run ${runId} was updated, but follow-up archive generation failed: ${message(error)}`);
+    return { status: 'updated-with-warning', id: runId, reason: 'post-save' };
+  }
+
   write(`Updated run ${runId}.`);
   return { status: 'updated', id: runId };
 }

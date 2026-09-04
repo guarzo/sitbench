@@ -286,6 +286,39 @@ describe('Archive.listRuns / rebuildCatalog', () => {
   });
 });
 
+describe('Archive.listRunIds', () => {
+  it('lists run directory names without parsing run.json, so an incompatible summary does not block enumeration', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    // Simulate a legacy/incompatible run: a directory whose run.json fails
+    // the current strict schema. listRuns() would throw while parsing this;
+    // listRunIds() must still enumerate it since it never parses run.json.
+    const legacyDir = path.join(archiveDir, 'runs', 'legacy-run');
+    await mkdir(legacyDir, { recursive: true });
+    await writeFile(path.join(legacyDir, 'run.json'), '{"not":"a valid run summary"}', 'utf8');
+
+    await expect(archive.listRuns()).rejects.toThrow();
+    expect(await archive.listRunIds()).toEqual(['legacy-run', summary.id].sort());
+  });
+
+  it('ignores in-progress temp directories', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    await mkdir(path.join(archiveDir, 'runs', '.tmp-should-be-ignored'), { recursive: true });
+
+    expect(await archive.listRunIds()).toEqual([summary.id]);
+  });
+
+  it('returns an empty list when no runs directory exists yet', async () => {
+    const archive = new Archive(archiveDir);
+    expect(await archive.listRunIds()).toEqual([]);
+  });
+});
+
 describe('Archive.updateRun', () => {
   it('updates a run in place, preserves id/createdAt, and bumps updatedAt', async () => {
     const archive = new Archive(archiveDir);
@@ -378,6 +411,27 @@ describe('Archive.updateRun', () => {
     }));
 
     expect(updated.fingerprint).toBe(summary.fingerprint);
+  });
+
+  it('updates a valid run even when an unrelated run has an incompatible summary', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    // An unrelated run whose run.json itself fails the current strict
+    // schema. The duplicate-fingerprint check inside updateRun must not
+    // let this unrelated, unparsable run block updating a different valid
+    // run — the same tolerance listRunIds() provides for enumeration.
+    const legacyDir = path.join(archiveDir, 'runs', 'legacy-run');
+    await mkdir(legacyDir, { recursive: true });
+    await writeFile(path.join(legacyDir, 'run.json'), '{"not":"a valid run summary"}', 'utf8');
+
+    const updated = await archive.updateRun(summary.id, ({ summary: current, events }) => ({
+      summary: { ...current, notes: 'updated despite an unrelated incompatible run' },
+      events,
+    }));
+
+    expect(updated.notes).toBe('updated despite an unrelated incompatible run');
   });
 });
 

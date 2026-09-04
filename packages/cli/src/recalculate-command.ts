@@ -6,7 +6,6 @@ import {
   fingerprintRun,
   type CalculationSettings,
   type CharacterMetrics,
-  type Coverage,
   type NormalizedEvent,
   type RunMetrics,
   type RunSummary,
@@ -33,7 +32,10 @@ export type RecalculateOutcome =
   | { id: string; status: 'not-found' }
   | { id: string; status: 'error'; reason: string };
 
-export type RecalculateResult = { status: 'ok'; outcomes: RecalculateOutcome[] } | { status: 'fatal'; reason: string };
+export type RecalculateResult =
+  | { status: 'ok'; outcomes: RecalculateOutcome[] }
+  | { status: 'partial'; outcomes: RecalculateOutcome[] }
+  | { status: 'fatal'; reason: string };
 
 /**
  * The current metrics-calculation version. There is no incrementing
@@ -47,58 +49,33 @@ export interface RecalculatedFields {
   calculation: CalculationSettings;
   metrics: RunMetrics;
   characterMetrics: CharacterMetrics[];
-  coverage: Coverage;
-  /** The archived events that actually fall inside `window`. */
-  events: NormalizedEvent[];
   fingerprint: string;
 }
 
 /**
- * Recomputes every metric/coverage/fingerprint field derivable purely from
- * the confirmed `window`, the recorded `calculation` thresholds, and the
+ * Recomputes every metric/fingerprint field derivable purely from the
+ * confirmed `window`, the recorded `calculation` thresholds, and the
  * archived normalized `events` — the only durable source of truth
- * recalculation and window edits are allowed to read. Never fabricates a
- * value: `logFiles` and `unparsedCombatLines` describe raw log inspection
- * that was never persisted per-event, so they are carried over unchanged
- * from `previousCoverage` rather than invented.
+ * recalculation and window edits are allowed to read. `events` is always
+ * the *full* archived event stream (never pre-filtered by the caller);
+ * `calculateRun`/`fingerprintRun` filter internally by `window` bounds, so
+ * passing the complete archived events here is both correct and keeps
+ * callers from accidentally truncating what gets persisted. Coverage is
+ * ingestion provenance recorded once at analyze-time; this function
+ * intentionally has no coverage input or output — callers must carry the
+ * current summary's `coverage` over unchanged.
  */
 export function recalculateFields(
   window: RunWindow,
   events: NormalizedEvent[],
   calculation: CalculationSettings,
-  previousCoverage: Coverage,
 ): RecalculatedFields {
-  const windowEvents = events.filter((event) => isInWindow(event, window));
-  const calculated = calculateRun(windowEvents, window, calculation);
+  const calculated = calculateRun(events, window, calculation);
   return {
     calculation: calculated.calculation,
     metrics: calculated.metrics,
     characterMetrics: calculated.characterMetrics,
-    coverage: recomputeCoverage(windowEvents, previousCoverage),
-    events: windowEvents,
-    fingerprint: fingerprintRun(windowEvents, window),
-  };
-}
-
-function recomputeCoverage(windowEvents: NormalizedEvent[], previous: Coverage): Coverage {
-  const participantsWithOutgoingDamage = new Set(
-    windowEvents.filter((event) => event.kind === 'damage-dealt').map((event) => event.observedBy),
-  ).size;
-  const ambiguousEventsExcluded = windowEvents.filter(
-    (event) => (event.kind === 'damage-dealt' || event.kind === 'miss') && event.targetClassification === 'ambiguous',
-  ).length;
-  const repairPairing: Coverage['repairPairing'] = windowEvents.some(
-    (event) => event.kind === 'remote-repair-delivered' || event.kind === 'remote-repair-received',
-  )
-    ? 'partial'
-    : 'none';
-
-  return {
-    logFiles: previous.logFiles,
-    unparsedCombatLines: previous.unparsedCombatLines,
-    participantsWithOutgoingDamage,
-    ambiguousEventsExcluded,
-    repairPairing,
+    fingerprint: fingerprintRun(events, window),
   };
 }
 
@@ -137,10 +114,17 @@ export function message(error: unknown): string {
  * Recalculates one archived run (or every archived run with `--all`) from
  * its durable confirmed window, recorded calculation thresholds, and
  * archived normalized events. The confirmed window, site, fleet profile,
- * notes, calculation thresholds, and `createdAt` are always preserved
- * untouched; only derived metrics/characterMetrics/participants/coverage and
- * `metricsVersion` are replaced. Every mutation goes through
- * `Archive.updateRun`, which persists atomically and rebuilds `catalog.json`.
+ * notes, calculation thresholds, coverage (ingestion provenance), and
+ * `createdAt` are always preserved untouched; only derived
+ * metrics/characterMetrics/participants and `metricsVersion` are replaced.
+ * Every mutation goes through `Archive.updateRun`, which persists atomically
+ * and rebuilds `catalog.json`. `--all` enumerates run ids via
+ * `Archive.listRunIds()` (which never parses `run.json`) rather than
+ * `Archive.listRuns()`, so one incompatible archived run never blocks
+ * recalculation of every other run in the batch; the top-level result is
+ * `'partial'` whenever any requested run could not be recalculated
+ * (incompatible, not found, or another error), while every processable run
+ * in the batch is still recalculated.
  */
 export async function runRecalculate(
   arguments_: RecalculateArguments,
@@ -160,13 +144,11 @@ export async function runRecalculate(
 
   let ids: string[];
   if (arguments_.all === true) {
-    let runs: RunSummary[];
     try {
-      runs = await archive.listRuns();
+      ids = await archive.listRunIds();
     } catch (error) {
       return fatal(write, `Cannot read archived runs: ${message(error)}`, 'archive');
     }
-    ids = runs.map((run) => run.id).sort();
   } else {
     ids = [(arguments_.runId as string).trim()];
   }
@@ -178,7 +160,10 @@ export async function runRecalculate(
     write(describeOutcome(id, outcome));
   }
 
-  return { status: 'ok', outcomes };
+  const hasFailure = outcomes.some(
+    (outcome) => outcome.status === 'incompatible' || outcome.status === 'not-found' || outcome.status === 'error',
+  );
+  return { status: hasFailure ? 'partial' : 'ok', outcomes };
 }
 
 async function recalculateOne(
@@ -188,14 +173,13 @@ async function recalculateOne(
 ): Promise<RecalculateOutcome> {
   try {
     await archive.updateRun(id, ({ summary, events }) => {
-      const fields = recalculateFields(summary.window, events, summary.calculation, summary.coverage);
+      const fields = recalculateFields(summary.window, events, summary.calculation);
       const nextSummary: RunSummary = {
         ...summary,
         calculation: fields.calculation,
         metrics: fields.metrics,
         characterMetrics: fields.characterMetrics,
         participants: fields.characterMetrics.map((metric) => metric.character),
-        coverage: fields.coverage,
         metricsVersion: METRICS_VERSION,
       };
       return { summary: nextSummary, events };

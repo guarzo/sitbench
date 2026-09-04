@@ -383,9 +383,49 @@ export class Archive {
     return summaries;
   }
 
+  /**
+   * Reads and validates every run summary, optionally excluding `excludeId`,
+   * silently skipping any entry whose own `run.json` fails the current
+   * strict schema. Used for `catalog.json` rebuilding and the
+   * duplicate-fingerprint check inside `updateRun`, both of which must be
+   * able to make progress for every other valid run even when one
+   * archived run's summary is incompatible — the same enumeration
+   * tolerance `listRunIds()` provides. Unlike `readAllRunSummaries()`
+   * (used by the public, validating `listRuns()`), a skipped, unparsable
+   * summary cannot contribute a trustworthy fingerprint/catalog entry, so
+   * omitting it here does not weaken the result for every other
+   * (parseable) run — it is simply left out of the derived index/check
+   * rather than blocking it entirely.
+   */
+  private async readValidRunSummaries(excludeId?: string): Promise<RunSummary[]> {
+    const runsDir = this.runsDir();
+    if (!(await pathExists(runsDir))) {
+      return [];
+    }
+
+    const entries = await readdir(runsDir, { withFileTypes: true });
+    const summaries: RunSummary[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith(TMP_PREFIX) || entry.name === excludeId) {
+        continue;
+      }
+      const runJsonPath = path.join(runsDir, entry.name, 'run.json');
+      if (!(await pathExists(runJsonPath))) {
+        continue;
+      }
+      try {
+        const raw = await readFile(runJsonPath, 'utf8');
+        summaries.push(RunSummarySchema.parse(JSON.parse(raw)));
+      } catch {
+        continue;
+      }
+    }
+    return summaries;
+  }
+
   /** Rebuilds `catalog.json` from validated run summaries. Assumes the caller already holds the lock. */
   private async rebuildCatalogLocked(): Promise<CatalogEntry[]> {
-    const summaries = await this.readAllRunSummaries();
+    const summaries = await this.readValidRunSummaries();
     const entries = summaries.map(toCatalogEntry).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 
     try {
@@ -487,6 +527,29 @@ export class Archive {
     return this.readAllRunSummaries();
   }
 
+  /**
+   * Lists every run id present as a `runs/<id>` directory, without parsing
+   * or validating `run.json`/`events.jsonl`. Ignores in-progress `.tmp-*`
+   * directories and any entry whose name is not a single safe path segment
+   * (defensive; `saveRun`/`updateRun` never create such an entry, but this
+   * keeps enumeration itself safe regardless). Unlike `listRuns()`, this
+   * never throws when a run's `run.json` fails the current strict schema —
+   * callers that must recover or report on an incompatible run (e.g.
+   * `recalculate --all`) need to enumerate its id without that one run's
+   * unrelated validation failure blocking every other run's enumeration.
+   */
+  async listRunIds(): Promise<string[]> {
+    const runsDir = this.runsDir();
+    if (!(await pathExists(runsDir))) {
+      return [];
+    }
+    const entries = await readdir(runsDir, { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith(TMP_PREFIX) && RUN_ID_PATTERN.test(entry.name))
+      .map((entry) => entry.name)
+      .sort();
+  }
+
   /** Rebuilds and returns `catalog.json` from validated run summaries. Safe to call for recovery. */
   async rebuildCatalog(): Promise<CatalogEntry[]> {
     const release = await acquireLock(this.archiveDir);
@@ -540,7 +603,7 @@ export class Archive {
       });
       const finalEvents = updated.events.map((event) => NormalizedEventSchema.parse(event));
 
-      const otherSummaries = (await this.readAllRunSummaries()).filter((run) => run.id !== id);
+      const otherSummaries = await this.readValidRunSummaries(id);
       if (otherSummaries.some((run) => run.fingerprint === finalSummary.fingerprint)) {
         throw new DuplicateRunError(
           `Cannot update run "${id}": fingerprint "${finalSummary.fingerprint}" is already used by another run (id "${
