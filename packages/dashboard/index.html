@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sitbench Dashboard</title>
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <h1>Sitbench</h1>
+        <span class="subtitle">Performance Dashboard</span>
+      </header>
+      <nav id="filters" role="search" aria-label="Run filters"></nav>
+      <section id="overview" role="region" aria-label="Run overview"></section>
+      <section id="trends" role="region" aria-label="Performance trends"></section>
+      <section id="history" role="region" aria-label="Run history"></section>
+      <section id="detail" role="region" aria-label="Selected run detail"></section>
+      <section id="compare" role="region" aria-label="Run comparison"></section>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

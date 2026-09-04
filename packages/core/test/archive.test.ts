@@ -1,0 +1,946 @@
+import { mkdir, mkdtemp, open, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  Archive,
+  ArchiveLockedError,
+  CatalogRebuildError,
+  DuplicateRunError,
+  InvalidRunIdError,
+  RunNotFoundError,
+  acquireLock,
+  writeFileAtomic,
+  writeRunDirectoryAtomic,
+} from '../src/archive.js';
+import type { NormalizedEvent, RunSummary } from '../src/schemas.js';
+
+let archiveDir: string;
+
+beforeEach(async () => {
+  archiveDir = await mkdtemp(path.join(tmpdir(), 'sitbench-archive-'));
+});
+
+afterEach(async () => {
+  await rm(archiveDir, { recursive: true, force: true });
+});
+
+function buildEvent(overrides: Partial<NormalizedEvent> = {}): NormalizedEvent {
+  return {
+    kind: 'damage-dealt',
+    timestamp: '2026-09-03T04:51:14.000Z',
+    observedBy: 'Dah Nee',
+    sourceFile: 'Gamelogs_20260903.txt',
+    sourceLine: 1,
+    raw: 'raw-line',
+    actor: 'Dah Nee',
+    target: 'Sleepless Guardian',
+    amount: 100,
+    hitQuality: 'Hits',
+    targetClassification: 'npc',
+    ...overrides,
+  } as NormalizedEvent;
+}
+
+function buildSummary(overrides: Partial<RunSummary> = {}): RunSummary {
+  return {
+    schemaVersion: 1,
+    parserVersion: '0.1.0',
+    metricsVersion: '0.1.0',
+    id: '2026-09-03T045114Z-core-bastion',
+    site: { name: 'Core Bastion', key: 'core-bastion' },
+    fleetProfile: { id: '8-kikis-2-deacons', name: '8 Kikis + 2 Deacons' },
+    window: {
+      start: '2026-09-03T04:51:14.000Z',
+      end: '2026-09-03T05:03:36.000Z',
+      source: 'first-and-last-outgoing-npc-damage',
+      manuallyAdjusted: false,
+    },
+    participants: ['Dah Nee'],
+    calculation: { episodeThresholdSeconds: 180, activeCombatGapSeconds: 30 },
+    metrics: {
+      elapsedSeconds: 742,
+      activeCombatSeconds: 694,
+      idleSeconds: 48,
+      fleetDamageDealt: 100,
+      averageFleetDps: 0.13,
+      activeFleetDps: 0.14,
+      damageTaken: 0,
+      remoteRepairDelivered: 0,
+      participantCount: 1,
+    },
+    characterMetrics: [],
+    coverage: {
+      logFiles: 1,
+      participantsWithOutgoingDamage: 1,
+      unparsedCombatLines: 0,
+      ambiguousEventsExcluded: 0,
+      repairPairing: 'none',
+    },
+    notes: null,
+    fingerprint: 'fingerprint-abc',
+    createdAt: '2026-09-03T05:05:12.000Z',
+    updatedAt: '2026-09-03T05:05:12.000Z',
+    ...overrides,
+  };
+}
+
+describe('Archive.saveRun', () => {
+  it('creates exactly runs/<id>/run.json, runs/<id>/events.jsonl, and catalog.json', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    const runDirEntries = await readdir(path.join(archiveDir, 'runs', summary.id));
+    expect(runDirEntries.sort()).toEqual(['events.jsonl', 'run.json']);
+
+    const topLevelEntries = await readdir(archiveDir);
+    expect(topLevelEntries).toContain('catalog.json');
+    expect(topLevelEntries).toContain('runs');
+
+    const catalog = JSON.parse(await readFile(path.join(archiveDir, 'catalog.json'), 'utf8'));
+    expect(catalog).toHaveLength(1);
+    expect(catalog[0]).toMatchObject({ id: summary.id, siteKey: 'core-bastion', fleetProfileId: '8-kikis-2-deacons' });
+  });
+
+  it('persists the run summary and events such that loadRun round-trips them', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    const events = [buildEvent({ sourceLine: 1 }), buildEvent({ sourceLine: 2, amount: 50 })];
+    await archive.saveRun(summary, events);
+
+    const loaded = await archive.loadRun(summary.id);
+    expect(loaded).not.toBeNull();
+    expect(loaded?.summary).toEqual(summary);
+    expect(loaded?.events).toEqual(events);
+  });
+
+  it('rejects a duplicate run id without adding a second run', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    await expect(archive.saveRun(summary, [buildEvent()])).rejects.toThrow(DuplicateRunError);
+
+    const runs = await archive.listRuns();
+    expect(runs).toHaveLength(1);
+  });
+
+  it('rejects a duplicate fingerprint under a different run id without adding a second run', async () => {
+    const archive = new Archive(archiveDir);
+    const first = buildSummary();
+    await archive.saveRun(first, [buildEvent()]);
+
+    const second = buildSummary({ id: '2026-09-04T045114Z-core-bastion', fingerprint: first.fingerprint });
+    await expect(archive.saveRun(second, [buildEvent()])).rejects.toThrow(DuplicateRunError);
+
+    const runs = await archive.listRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.id).toBe(first.id);
+  });
+
+  it('rejects a run summary that fails schema validation and writes nothing', async () => {
+    const archive = new Archive(archiveDir);
+    const invalid = { ...buildSummary(), schemaVersion: 2 } as unknown as RunSummary;
+
+    await expect(archive.saveRun(invalid, [buildEvent()])).rejects.toThrow();
+
+    const topLevelEntries = await readdir(archiveDir).catch(() => []);
+    expect(topLevelEntries.includes('runs')).toBe(false);
+  });
+
+  it('fails clearly when a lock directory is already held by another process, without creating a run', async () => {
+    await mkdir(archiveDir, { recursive: true });
+    await mkdir(path.join(archiveDir, '.lock'));
+
+    const archive = new Archive(archiveDir);
+    await expect(archive.saveRun(buildSummary(), [buildEvent()])).rejects.toThrow(ArchiveLockedError);
+
+    const runsDirExists = await readdir(archiveDir).then((entries) => entries.includes('runs')).catch(() => false);
+    expect(runsDirExists).toBe(false);
+  });
+
+  it('releases the lock after a successful save so a subsequent save can proceed', async () => {
+    const archive = new Archive(archiveDir);
+    await archive.saveRun(buildSummary(), [buildEvent()]);
+
+    const second = buildSummary({ id: '2026-09-05T045114Z-core-bastion', fingerprint: 'fingerprint-def' });
+    await expect(archive.saveRun(second, [buildEvent()])).resolves.toBeDefined();
+
+    const runs = await archive.listRuns();
+    expect(runs).toHaveLength(2);
+  });
+
+  it('releases the lock after a failed save (duplicate) so a subsequent independent save can proceed', async () => {
+    const archive = new Archive(archiveDir);
+    const first = buildSummary();
+    await archive.saveRun(first, [buildEvent()]);
+
+    await expect(archive.saveRun(first, [buildEvent()])).rejects.toThrow(DuplicateRunError);
+
+    const second = buildSummary({ id: '2026-09-06T045114Z-core-bastion', fingerprint: 'fingerprint-ghi' });
+    await expect(archive.saveRun(second, [buildEvent()])).resolves.toBeDefined();
+  });
+
+  it('genuinely concurrent saveRun calls: exactly one wins and the loser fails clearly with no corruption', async () => {
+    const archive = new Archive(archiveDir);
+    const first = buildSummary({ id: 'run-a', fingerprint: 'fp-a' });
+    const second = buildSummary({ id: 'run-b', fingerprint: 'fp-b' });
+
+    const [outcomeOne, outcomeTwo] = await Promise.allSettled([
+      archive.saveRun(first, [buildEvent()]),
+      archive.saveRun(second, [buildEvent()]),
+    ]);
+
+    const outcomes = [outcomeOne, outcomeTwo];
+    const fulfilled = outcomes.filter((outcome) => outcome.status === 'fulfilled');
+    const rejected = outcomes.filter((outcome) => outcome.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(ArchiveLockedError);
+
+    const runs = await archive.listRuns();
+    expect(runs).toHaveLength(1);
+  });
+
+  it('reports a catalog rebuild failure while keeping the durable run persisted (no rollback)', async () => {
+    // Force catalog.json to collide with a directory so the rebuild write fails.
+    await mkdir(path.join(archiveDir, 'catalog.json'), { recursive: true });
+
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await expect(archive.saveRun(summary, [buildEvent()])).rejects.toThrow(CatalogRebuildError);
+
+    // The authoritative run must still exist on disk despite the catalog failure.
+    const runDirEntries = await readdir(path.join(archiveDir, 'runs', summary.id));
+    expect(runDirEntries.sort()).toEqual(['events.jsonl', 'run.json']);
+
+    // Clearing the obstruction and rebuilding later must succeed.
+    await rm(path.join(archiveDir, 'catalog.json'), { recursive: true, force: true });
+    const entries = await archive.rebuildCatalog();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.id).toBe(summary.id);
+  });
+
+  it('rejects a run id containing a path-traversal segment before touching the filesystem', async () => {
+    const archive = new Archive(archiveDir);
+    const traversal = buildSummary({ id: '../../outside-archive' });
+
+    await expect(archive.saveRun(traversal, [buildEvent()])).rejects.toThrow();
+
+    const topLevelEntries = await readdir(archiveDir).catch(() => []);
+    expect(topLevelEntries.includes('runs')).toBe(false);
+  });
+
+  it('rejects a new run whose fingerprint collides with an existing legacy-incompatible run, as long as that run\'s own id/fingerprint are intact', async () => {
+    await mkdir(archiveDir, { recursive: true });
+    const legacyDir = path.join(archiveDir, 'runs', 'legacy-run');
+    await mkdir(legacyDir, { recursive: true });
+    const legacySummary = { ...buildSummary({ id: 'legacy-run', fingerprint: 'legacy-fingerprint' }), legacyExtraField: 'unsupported' };
+    await writeFile(path.join(legacyDir, 'run.json'), `${JSON.stringify(legacySummary, null, 2)}\n`, 'utf8');
+
+    const archive = new Archive(archiveDir);
+    const candidate = buildSummary({ id: 'new-run', fingerprint: 'legacy-fingerprint' });
+
+    await expect(archive.saveRun(candidate, [buildEvent()])).rejects.toThrow(DuplicateRunError);
+
+    const runDirExists = await readdir(path.join(archiveDir, 'runs')).then((entries) => entries.includes('new-run'));
+    expect(runDirExists).toBe(false);
+  });
+
+  it('fails closed on save when a sibling directory\'s summary id does not match its own directory name', async () => {
+    await mkdir(archiveDir, { recursive: true });
+    // A directory named "dir-a" whose run.json claims a completely
+    // different id ("dir-b"). Duplicate-fingerprint enforcement must never
+    // trust this claimed logical id over the directory it actually lives
+    // in — an inconsistent directory/id pairing is itself corruption,
+    // independent of whether its fingerprint happens to collide with
+    // anything.
+    const mismatchedDir = path.join(archiveDir, 'runs', 'dir-a');
+    await mkdir(mismatchedDir, { recursive: true });
+    const mismatchedSummary = buildSummary({ id: 'dir-b', fingerprint: 'unrelated-fingerprint' });
+    await writeFile(path.join(mismatchedDir, 'run.json'), `${JSON.stringify(mismatchedSummary, null, 2)}\n`, 'utf8');
+
+    const archive = new Archive(archiveDir);
+    const candidate = buildSummary({ id: 'new-run', fingerprint: 'some-other-fingerprint' });
+
+    await expect(archive.saveRun(candidate, [buildEvent()])).rejects.toThrow();
+
+    const runDirExists2 = await readdir(path.join(archiveDir, 'runs')).then((entries) => entries.includes('new-run'));
+    expect(runDirExists2).toBe(false);
+  });
+});
+
+describe('Archive.loadRun', () => {
+  it('fails clearly with ArchiveLockedError when the archive is locked by another process', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    // Simulate a concurrent writer holding the lock (guards against a
+    // "mixed generation" read — run.json from one update paired with a stale
+    // or in-progress events.jsonl).
+    await mkdir(path.join(archiveDir, '.lock'));
+
+    await expect(archive.loadRun(summary.id)).rejects.toThrow(ArchiveLockedError);
+  });
+
+  it('rejects a path-traversal id before touching the filesystem', async () => {
+    const archive = new Archive(archiveDir);
+    await expect(archive.loadRun('../../outside-archive')).rejects.toThrow(InvalidRunIdError);
+  });
+});
+
+describe('Archive.listRuns / rebuildCatalog', () => {
+  it('returns an empty list and rebuilds an empty catalog when no runs exist', async () => {
+    const archive = new Archive(archiveDir);
+    expect(await archive.listRuns()).toEqual([]);
+    expect(await archive.rebuildCatalog()).toEqual([]);
+  });
+
+  it('rebuilds catalog.json entries from validated run.json files after deletion', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+    await rm(path.join(archiveDir, 'catalog.json'));
+
+    const entries = await archive.rebuildCatalog();
+    expect(entries).toEqual([
+      {
+        id: summary.id,
+        siteKey: 'core-bastion',
+        siteName: 'Core Bastion',
+        fleetProfileId: '8-kikis-2-deacons',
+        fleetProfileName: '8 Kikis + 2 Deacons',
+        windowStart: summary.window.start,
+        windowEnd: summary.window.end,
+        elapsedSeconds: summary.metrics.elapsedSeconds,
+        activeCombatSeconds: summary.metrics.activeCombatSeconds,
+        participantCount: summary.metrics.participantCount,
+        fingerprint: summary.fingerprint,
+        createdAt: summary.createdAt,
+      },
+    ]);
+  });
+
+  it('throws and leaves the previous catalog.json byte-for-byte untouched rather than silently omitting an invalid run', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+    const baselineCatalog = await readFile(path.join(archiveDir, 'catalog.json'), 'utf8');
+
+    // A sibling run whose summary fails the current strict schema (but is
+    // otherwise readable JSON with a valid id/fingerprint) must never be
+    // silently excluded from a "successful" rebuild — that would make
+    // corruption invisible, since the resulting catalog.json would look
+    // identical to one built from only the valid runs.
+    const legacyDir = path.join(archiveDir, 'runs', 'legacy-run');
+    await mkdir(legacyDir, { recursive: true });
+    const legacySummary = { ...buildSummary({ id: 'legacy-run', fingerprint: 'legacy-fingerprint' }), legacyExtraField: 'unsupported' };
+    await writeFile(path.join(legacyDir, 'run.json'), `${JSON.stringify(legacySummary, null, 2)}\n`, 'utf8');
+
+    await expect(archive.rebuildCatalog()).rejects.toThrow(CatalogRebuildError);
+
+    const catalogAfterFailure = await readFile(path.join(archiveDir, 'catalog.json'), 'utf8');
+    expect(catalogAfterFailure).toBe(baselineCatalog);
+  });
+});
+
+describe('Archive.listRunIds', () => {
+  it('lists run directory names without parsing run.json, so an incompatible summary does not block enumeration', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    // Simulate a legacy/incompatible run: a directory whose run.json fails
+    // the current strict schema. listRuns() would throw while parsing this;
+    // listRunIds() must still enumerate it since it never parses run.json.
+    const legacyDir = path.join(archiveDir, 'runs', 'legacy-run');
+    await mkdir(legacyDir, { recursive: true });
+    await writeFile(path.join(legacyDir, 'run.json'), '{"not":"a valid run summary"}', 'utf8');
+
+    await expect(archive.listRuns()).rejects.toThrow();
+    expect(await archive.listRunIds()).toEqual(['legacy-run', summary.id].sort());
+  });
+
+  it('ignores in-progress temp directories', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    await mkdir(path.join(archiveDir, 'runs', '.tmp-should-be-ignored'), { recursive: true });
+
+    expect(await archive.listRunIds()).toEqual([summary.id]);
+  });
+
+  it('returns an empty list when no runs directory exists yet', async () => {
+    const archive = new Archive(archiveDir);
+    expect(await archive.listRunIds()).toEqual([]);
+  });
+});
+
+describe('Archive.updateRun', () => {
+  it('updates a run in place, preserves id/createdAt, and bumps updatedAt', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    const updated = await archive.updateRun(summary.id, ({ summary: current, events }) => ({
+      summary: { ...current, notes: 'Great run' },
+      events,
+    }));
+
+    expect(updated.notes).toBe('Great run');
+    expect(updated.id).toBe(summary.id);
+    expect(updated.createdAt).toBe(summary.createdAt);
+    expect(Date.parse(updated.updatedAt)).toBeGreaterThanOrEqual(Date.parse(summary.updatedAt));
+
+    const reloaded = await archive.loadRun(summary.id);
+    expect(reloaded?.summary.notes).toBe('Great run');
+  });
+
+  it('rebuilds the catalog after an update', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    await archive.updateRun(summary.id, ({ summary: current, events }) => ({
+      summary: { ...current, metrics: { ...current.metrics, elapsedSeconds: 999 } },
+      events,
+    }));
+
+    const catalog = JSON.parse(await readFile(path.join(archiveDir, 'catalog.json'), 'utf8'));
+    expect(catalog[0].elapsedSeconds).toBe(999);
+  });
+
+  it('throws RunNotFoundError for a nonexistent run id', async () => {
+    const archive = new Archive(archiveDir);
+    await expect(
+      archive.updateRun('does-not-exist', ({ summary, events }) => ({ summary, events })),
+    ).rejects.toThrow(RunNotFoundError);
+  });
+
+  it('rejects an updater that changes the run id', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    await expect(
+      archive.updateRun(summary.id, ({ summary: current, events }) => ({
+        summary: { ...current, id: 'different-id' },
+        events,
+      })),
+    ).rejects.toThrow();
+  });
+
+  it('rejects a path-traversal id before touching the filesystem', async () => {
+    const archive = new Archive(archiveDir);
+    await expect(
+      archive.updateRun('../../outside-archive', ({ summary, events }) => ({ summary, events })),
+    ).rejects.toThrow(InvalidRunIdError);
+  });
+
+  it('rejects an update whose new fingerprint collides with a different existing run, leaving both runs unchanged', async () => {
+    const archive = new Archive(archiveDir);
+    const runA = buildSummary({ id: 'run-a', fingerprint: 'fp-a' });
+    const runB = buildSummary({ id: 'run-b', fingerprint: 'fp-b' });
+    await archive.saveRun(runA, [buildEvent()]);
+    await archive.saveRun(runB, [buildEvent()]);
+
+    await expect(
+      archive.updateRun(runB.id, ({ summary: current, events }) => ({
+        summary: { ...current, fingerprint: runA.fingerprint },
+        events,
+      })),
+    ).rejects.toThrow(DuplicateRunError);
+
+    const reloadedA = await archive.loadRun(runA.id);
+    const reloadedB = await archive.loadRun(runB.id);
+    expect(reloadedA?.summary.fingerprint).toBe('fp-a');
+    expect(reloadedB?.summary.fingerprint).toBe('fp-b');
+  });
+
+  it('allows an update that keeps the same fingerprint it already had (self-match is not a collision)', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    const updated = await archive.updateRun(summary.id, ({ summary: current, events }) => ({
+      summary: { ...current, notes: 'still the same fingerprint' },
+      events,
+    }));
+
+    expect(updated.fingerprint).toBe(summary.fingerprint);
+  });
+
+  it('updates a valid run despite an unrelated run whose summary is legacy-incompatible but whose id/fingerprint are intact, and reports the resulting catalog rebuild failure without discarding the update', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    // An unrelated run whose run.json fails the current strict
+    // RunSummarySchema (an unsupported extra field), but whose id and
+    // fingerprint are themselves intact. Duplicate-fingerprint enforcement
+    // must still be able to trust this run's identity/fingerprint (so a
+    // colliding update is still rejected — see the dedicated test below),
+    // but the derived catalog.json cannot represent it, so rebuilding the
+    // catalog after this update must fail loudly rather than silently
+    // omitting it.
+    const legacyDir = path.join(archiveDir, 'runs', 'legacy-run');
+    await mkdir(legacyDir, { recursive: true });
+    const legacySummary = { ...buildSummary({ id: 'legacy-run', fingerprint: 'legacy-fingerprint' }), legacyExtraField: 'unsupported' };
+    await writeFile(path.join(legacyDir, 'run.json'), `${JSON.stringify(legacySummary, null, 2)}\n`, 'utf8');
+
+    await expect(
+      archive.updateRun(summary.id, ({ summary: current, events }) => ({
+        summary: { ...current, notes: 'updated despite an unrelated legacy-incompatible run' },
+        events,
+      })),
+    ).rejects.toThrow(CatalogRebuildError);
+
+    // The update itself must still be persisted — only the derivative
+    // catalog rebuild failed, not the authoritative run write.
+    const reloaded = await archive.loadRun(summary.id);
+    expect(reloaded?.summary.notes).toBe('updated despite an unrelated legacy-incompatible run');
+  });
+
+  it('rejects an update whose new fingerprint collides with an unrelated legacy-incompatible run, as long as that run\'s own id/fingerprint are intact', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    const legacyDir = path.join(archiveDir, 'runs', 'legacy-run');
+    await mkdir(legacyDir, { recursive: true });
+    const legacySummary = { ...buildSummary({ id: 'legacy-run', fingerprint: 'legacy-fingerprint' }), legacyExtraField: 'unsupported' };
+    await writeFile(path.join(legacyDir, 'run.json'), `${JSON.stringify(legacySummary, null, 2)}\n`, 'utf8');
+
+    await expect(
+      archive.updateRun(summary.id, ({ summary: current, events }) => ({
+        summary: { ...current, fingerprint: 'legacy-fingerprint' },
+        events,
+      })),
+    ).rejects.toThrow(DuplicateRunError);
+
+    const reloaded = await archive.loadRun(summary.id);
+    expect(reloaded?.summary.fingerprint).toBe(summary.fingerprint);
+  });
+
+  it('fails closed (rejects, mutating nothing) when an unrelated run has no trustworthy id or fingerprint at all', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    // Genuinely corrupt: no id, no fingerprint — duplicate-fingerprint
+    // enforcement cannot determine whether this run's fingerprint would
+    // collide, so it must fail closed rather than silently proceeding.
+    const corruptDir = path.join(archiveDir, 'runs', 'corrupt-run');
+    await mkdir(corruptDir, { recursive: true });
+    await writeFile(path.join(corruptDir, 'run.json'), '{"not":"a valid run summary"}', 'utf8');
+
+    await expect(
+      archive.updateRun(summary.id, ({ summary: current, events }) => ({
+        summary: { ...current, notes: 'should never be persisted' },
+        events,
+      })),
+    ).rejects.toThrow();
+
+    const reloaded = await archive.loadRun(summary.id);
+    expect(reloaded?.summary.notes).toBe(summary.notes);
+  });
+
+  it('fails closed on update when a sibling directory\'s summary id does not match its own directory name', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    // A directory named "dir-a" whose run.json claims id "dir-b" instead.
+    // Even though this could otherwise pass the minimal id/fingerprint
+    // shape, an inconsistent directory/id pairing must never be trusted:
+    // it would let one archived run's on-disk location silently diverge
+    // from what it claims to be, which is corruption regardless of
+    // whether the claimed fingerprint would have collided with anything.
+    const mismatchedDir = path.join(archiveDir, 'runs', 'dir-a');
+    await mkdir(mismatchedDir, { recursive: true });
+    const mismatchedSummary = buildSummary({ id: 'dir-b', fingerprint: 'unrelated-fingerprint' });
+    await writeFile(path.join(mismatchedDir, 'run.json'), `${JSON.stringify(mismatchedSummary, null, 2)}\n`, 'utf8');
+
+    await expect(
+      archive.updateRun(summary.id, ({ summary: current, events }) => ({
+        summary: { ...current, notes: 'should never be persisted' },
+        events,
+      })),
+    ).rejects.toThrow();
+
+    const reloaded = await archive.loadRun(summary.id);
+    expect(reloaded?.summary.notes).toBe(summary.notes);
+  });
+
+  it('excludes the run being updated from duplicate-fingerprint enforcement by its validated identity, not merely because its directory name happens to match', async () => {
+    // A correctness check for the fix itself: excluding the current run
+    // from the fingerprint index must not be a blind "skip whatever
+    // directory happens to be named `id`" shortcut that bypasses the
+    // id/directory consistency check for that very directory. In the
+    // ordinary, uncorrupted case (directory name and summary id always
+    // agree, by construction), this must keep working exactly as before:
+    // an update that does not change its own fingerprint must never be
+    // rejected as colliding with itself.
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    const updated = await archive.updateRun(summary.id, ({ summary: current, events }) => ({
+      summary: { ...current, notes: 'self-fingerprint is never a collision' },
+      events,
+    }));
+
+    expect(updated.fingerprint).toBe(summary.fingerprint);
+    expect(updated.notes).toBe('self-fingerprint is never a collision');
+  });
+});
+
+describe('Archive.loadProfiles / upsertProfile', () => {
+  it('returns an empty array when no profiles exist yet', async () => {
+    const archive = new Archive(archiveDir);
+    expect(await archive.loadProfiles()).toEqual([]);
+  });
+
+  it('canonicalizes the id while preserving the original display name', async () => {
+    const archive = new Archive(archiveDir);
+    const profile = await archive.upsertProfile('8 Kikis + 2 Deacons');
+
+    expect(profile).toEqual({ id: '8-kikis-2-deacons', name: '8 Kikis + 2 Deacons' });
+    expect(await archive.loadProfiles()).toEqual([profile]);
+  });
+
+  it('updates the stored display name on a subsequent upsert with the same canonical id', async () => {
+    const archive = new Archive(archiveDir);
+    await archive.upsertProfile('8 Kikis + 2 Deacons');
+    const updated = await archive.upsertProfile('8 KIKIS + 2 DEACONS');
+
+    const profiles = await archive.loadProfiles();
+    expect(profiles).toHaveLength(1);
+    expect(profiles[0]).toEqual(updated);
+    expect(updated).toEqual({ id: '8-kikis-2-deacons', name: '8 KIKIS + 2 DEACONS' });
+  });
+
+  it('adds a distinct profile for a distinct canonical id', async () => {
+    const archive = new Archive(archiveDir);
+    await archive.upsertProfile('8 Kikis + 2 Deacons');
+    await archive.upsertProfile('Solo Vindicator');
+
+    const profiles = await archive.loadProfiles();
+    expect(profiles.map((p) => p.id).sort()).toEqual(['8-kikis-2-deacons', 'solo-vindicator']);
+  });
+});
+
+describe('writeFileAtomic (temp-file cleanup on failure)', () => {
+  it('removes its temp file when the final rename fails, without touching the pre-existing target', async () => {
+    const targetPath = path.join(archiveDir, 'target.json');
+    // Pre-occupy the target with a directory so renaming a file onto it fails.
+    await mkdir(targetPath, { recursive: true });
+    await writeFile(path.join(targetPath, 'sentinel.txt'), 'do-not-touch', 'utf8');
+
+    await expect(writeFileAtomic(targetPath, '{}')).rejects.toThrow();
+
+    // The pre-existing target directory and its contents must be untouched.
+    const targetEntries = await readdir(targetPath);
+    expect(targetEntries).toEqual(['sentinel.txt']);
+
+    // No leftover .tmp-* file anywhere in the archive directory.
+    const archiveEntries = await readdir(archiveDir);
+    expect(archiveEntries.some((name) => name.startsWith('.tmp-'))).toBe(false);
+  });
+
+  it('removes its temp file and preserves the pre-existing target file content when an injected post-temp-write rename step fails', async () => {
+    // Unlike the directory-conflict case above (which fails for a reason
+    // native to fs.rename semantics), this injects the failure directly at
+    // the exact post-temp-write, pre-rename boundary via the dependency
+    // seam, against a genuine pre-existing FILE target (not a directory
+    // conflict trick), proving the write is atomic at that precise point.
+    const targetPath = path.join(archiveDir, 'target-file.json');
+    await writeFile(targetPath, '{"original":true}', 'utf8');
+
+    await expect(
+      writeFileAtomic(targetPath, '{"new":true}', {
+        rename: async () => {
+          throw new Error('simulated rename failure');
+        },
+      }),
+    ).rejects.toThrow('simulated rename failure');
+
+    // The pre-existing target file content must be completely untouched.
+    const preserved = await readFile(targetPath, 'utf8');
+    expect(preserved).toBe('{"original":true}');
+
+    // No leftover .tmp-* file anywhere in the archive directory.
+    const archiveEntries = await readdir(archiveDir);
+    expect(archiveEntries.some((name) => name.startsWith('.tmp-'))).toBe(false);
+  });
+
+  it('uses the injected rename step instead of the native fs.rename when both are viable', async () => {
+    const targetPath = path.join(archiveDir, 'target-injected.json');
+    let calledWith: [string, string] | null = null;
+
+    await writeFileAtomic(targetPath, '{"written":true}', {
+      rename: async (oldPath, newPath) => {
+        calledWith = [oldPath, newPath];
+        const { rename } = await import('node:fs/promises');
+        await rename(oldPath, newPath);
+      },
+    });
+
+    expect(calledWith).not.toBeNull();
+    expect(calledWith?.[1]).toBe(targetPath);
+    const written = await readFile(targetPath, 'utf8');
+    expect(written).toBe('{"written":true}');
+  });
+});
+
+describe('writeRunDirectoryAtomic (temp-directory cleanup on failure)', () => {
+  it('removes its temp directory when the final rename fails, without touching the pre-existing target', async () => {
+    const runsDir = path.join(archiveDir, 'runs');
+    const targetDir = path.join(runsDir, 'existing-run');
+    // A non-empty pre-existing target directory makes the final rename fail
+    // (renaming a directory onto a non-empty directory is rejected).
+    await mkdir(targetDir, { recursive: true });
+    await writeFile(path.join(targetDir, 'sentinel.txt'), 'do-not-touch', 'utf8');
+
+    await expect(
+      writeRunDirectoryAtomic(runsDir, targetDir, buildSummary(), [buildEvent()]),
+    ).rejects.toThrow();
+
+    // The pre-existing target must be untouched.
+    const targetEntries = await readdir(targetDir);
+    expect(targetEntries).toEqual(['sentinel.txt']);
+
+    // No leftover .tmp-* directory remains inside runs/.
+    const runsEntries = await readdir(runsDir);
+    expect(runsEntries).toEqual(['existing-run']);
+  });
+});
+
+describe('acquireLock (lock directory + per-owner marker)', () => {
+  it('does not delete a replacement lock created by another owner after the original lock directory was manually removed', async () => {
+    const release1 = await acquireLock(archiveDir);
+
+    // An operator (or another process) removes what it believes is a stale
+    // lock directory, then a different process legitimately acquires a
+    // fresh one.
+    await rm(path.join(archiveDir, '.lock'), { recursive: true, force: true });
+    const release2 = await acquireLock(archiveDir);
+
+    // While release2 holds the lock, no third acquisition may proceed —
+    // "no two owners proceed" at once.
+    await expect(acquireLock(archiveDir)).rejects.toThrow(ArchiveLockedError);
+
+    // The original (now-stale) release must NOT delete the replacement's
+    // marker or directory.
+    await release1();
+    const lockDirEntriesAfterStaleRelease = await readdir(path.join(archiveDir, '.lock'));
+    expect(lockDirEntriesAfterStaleRelease).toHaveLength(1);
+
+    // The legitimate owner's release still works normally and fully cleans up.
+    await release2();
+    const lockDirGone = await stat(path.join(archiveDir, '.lock')).then(
+      () => false,
+      () => true,
+    );
+    expect(lockDirGone).toBe(true);
+  });
+
+  it('does not delete a replacement lock created between a failed marker write and this owner\'s setup-failure cleanup', async () => {
+    let replacementRelease: (() => Promise<void>) | undefined;
+
+    const failingMarkerWriteThatRaces = async (markerPath: string): Promise<void> => {
+      // Simulate: our marker write is about to fail, but before this
+      // acquisition's own cleanup runs, another process notices the
+      // (transiently marker-less) directory, decides it is abandoned,
+      // removes it, and legitimately re-acquires a fresh lock of its own.
+      await rm(path.dirname(markerPath), { recursive: true, force: true });
+      replacementRelease = await acquireLock(archiveDir);
+      throw new Error('simulated marker-write failure');
+    };
+
+    await expect(acquireLock(archiveDir, failingMarkerWriteThatRaces)).rejects.toThrow(
+      'simulated marker-write failure',
+    );
+
+    // The replacement lock (created by the "other process" simulated above)
+    // must still be completely intact: this failed acquisition's cleanup
+    // must not have deleted it — "no two owners proceed", but a subsequent
+    // acquisition attempt while it's held must still fail, and the
+    // replacement's own marker must still be exactly one entry.
+    const lockDirEntries = await readdir(path.join(archiveDir, '.lock'));
+    expect(lockDirEntries).toHaveLength(1);
+    await expect(acquireLock(archiveDir)).rejects.toThrow(ArchiveLockedError);
+
+    // The legitimate replacement owner can still release cleanly.
+    await replacementRelease?.();
+    const lockDirGone = await stat(path.join(archiveDir, '.lock')).then(
+      () => false,
+      () => true,
+    );
+    expect(lockDirGone).toBe(true);
+  });
+
+  it('cleans up its own marker and the now-empty directory when the failure occurs after the marker file was actually created (e.g. a post-create sync/close failure)', async () => {
+    const writeMarkerThenFailAfterCreatingFile = async (markerPath: string): Promise<void> => {
+      // Simulate: the marker file itself was genuinely created on disk, but
+      // a later step (e.g. fsync) failed.
+      const handle = await open(markerPath, 'wx');
+      await handle.close();
+      throw new Error('simulated post-create marker failure');
+    };
+
+    await expect(acquireLock(archiveDir, writeMarkerThenFailAfterCreatingFile)).rejects.toThrow(
+      'simulated post-create marker failure',
+    );
+
+    // Because our marker genuinely existed on disk, `unlink` succeeds during
+    // cleanup, so the now-empty directory is removed too — nothing leaked.
+    const lockDirGoneAfterFailure = await stat(path.join(archiveDir, '.lock')).then(
+      () => false,
+      () => true,
+    );
+    expect(lockDirGoneAfterFailure).toBe(true);
+
+    const release = await acquireLock(archiveDir);
+    await release();
+  });
+
+  it('does not leak an empty lock directory when the marker write fails before the marker file is ever created', async () => {
+    // Unlike normal release (which requires a successful unlink of this
+    // acquisition's own marker before ever attempting rmdir), failed-setup
+    // cleanup must always attempt rmdir so the directory this acquisition
+    // itself created via mkdir is never left behind, permanently blocking
+    // later operations.
+    const failBeforeCreatingAnything = async (): Promise<void> => {
+      throw new Error('simulated failure before the marker file exists');
+    };
+
+    await expect(acquireLock(archiveDir, failBeforeCreatingAnything)).rejects.toThrow(
+      'simulated failure before the marker file exists',
+    );
+
+    // The failed acquisition's own (still-empty) directory must be fully
+    // removed — no manual recovery required.
+    const lockDirGone = await stat(path.join(archiveDir, '.lock')).then(
+      () => false,
+      () => true,
+    );
+    expect(lockDirGone).toBe(true);
+
+    // A subsequent, real acquisition succeeds normally, immediately.
+    const release = await acquireLock(archiveDir);
+    await release();
+  });
+
+  it('removes a still-empty replacement directory raced during failed-setup cleanup, so that replacement cannot then proceed as owner', async () => {
+    // Reproduces the specific race the required design accepts: a
+    // "replacement" acquisition's mkdir has succeeded (an empty lock
+    // directory now exists) but its own marker has not yet been written
+    // when a *different*, failing acquisition's cleanup runs. Because
+    // failed-setup cleanup always attempts rmdir (not gated on this
+    // acquisition's own unlink succeeding), it removes that still-empty
+    // directory. The replacement's subsequent marker-write attempt must
+    // then fail, and it must never be treated as having acquired the lock.
+    let replacementMarkerPath: string | undefined;
+
+    const failingWriteThatRacesAnEmptyReplacement = async (markerPath: string): Promise<void> => {
+      const lockDir = path.dirname(markerPath);
+      // An operator manually removes what they believe is a stale
+      // (marker-less) lock directory; a different, legitimate process's
+      // `mkdir` immediately succeeds on the now-empty path — but that
+      // replacement has not yet gotten around to writing its own marker.
+      await rm(lockDir, { recursive: true, force: true });
+      await mkdir(lockDir);
+      replacementMarkerPath = path.join(lockDir, 'replacement-owner-token');
+      throw new Error('simulated marker-write failure racing an empty replacement');
+    };
+
+    await expect(acquireLock(archiveDir, failingWriteThatRacesAnEmptyReplacement)).rejects.toThrow(
+      'simulated marker-write failure racing an empty replacement',
+    );
+
+    // The replacement's directory must be gone: it was still empty (its own
+    // marker not yet written) when our failed-setup cleanup's unconditional
+    // rmdir ran, so rmdir succeeded.
+    const lockDirGone = await stat(path.join(archiveDir, '.lock')).then(
+      () => false,
+      () => true,
+    );
+    expect(lockDirGone).toBe(true);
+
+    // The replacement's own marker-write attempt, finishing "for real" now,
+    // must fail — proving it never proceeds as the lock's owner.
+    await expect(open(replacementMarkerPath as string, 'wx')).rejects.toThrow();
+
+    // Recovery: a fresh acquisition still succeeds normally afterward.
+    const release = await acquireLock(archiveDir);
+    await release();
+  });
+});
+
+describe('CatalogRebuildError messages', () => {
+  /**
+   * Forces a catalog rebuild failure by making catalog.json a directory, so
+   * the atomic rename onto it can never succeed.
+   */
+  async function blockCatalogWrites(): Promise<void> {
+    await mkdir(path.join(archiveDir, 'catalog.json'), { recursive: true });
+  }
+
+  async function rejectionMessage(operation: Promise<unknown>): Promise<string> {
+    const outcome = await operation.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(outcome).toBeInstanceOf(CatalogRebuildError);
+    return (outcome as Error).message;
+  }
+
+  it('says the new run was saved and remains authoritative when saveRun rebuilds the catalog', async () => {
+    await blockCatalogWrites();
+    const archive = new Archive(archiveDir);
+
+    const message = await rejectionMessage(archive.saveRun(buildSummary(), [buildEvent()]));
+
+    expect(message).toContain('saved');
+    expect(message).toContain('remains authoritative');
+    expect(message).toContain('rebuildCatalog()');
+    expect(message).not.toContain('updated');
+  });
+
+  it('says the run was updated and remains authoritative when updateRun rebuilds the catalog', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+    await rm(path.join(archiveDir, 'catalog.json'));
+    await blockCatalogWrites();
+
+    const message = await rejectionMessage(
+      archive.updateRun(summary.id, ({ summary: current, events }) => ({
+        summary: { ...current, notes: 'updated' },
+        events,
+      })),
+    );
+
+    expect(message).toContain('updated');
+    expect(message).toContain('remains authoritative');
+    expect(message).toContain('rebuildCatalog()');
+    expect(message).not.toContain('The run was saved');
+  });
+
+  it('never claims a run was saved or updated when an explicit rebuildCatalog fails', async () => {
+    await blockCatalogWrites();
+    const archive = new Archive(archiveDir);
+
+    const message = await rejectionMessage(archive.rebuildCatalog());
+
+    expect(message).toContain('catalog.json');
+    expect(message).toContain('untouched');
+    expect(message).not.toContain('saved');
+    expect(message).not.toContain('updated');
+    expect(message).not.toContain('remains authoritative');
+  });
+});

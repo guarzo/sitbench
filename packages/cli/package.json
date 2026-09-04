@@ -1,0 +1,28 @@
+{
+  "name": "@sitbench/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "sitbench": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "pnpm --filter \"@sitbench/dashboard...\" build && tsc --project tsconfig.json",
+    "test": "pnpm --filter \"@sitbench/dashboard...\" build && vitest run",
+    "vitest": "vitest",
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "7.10.1",
+    "@sitbench/core": "workspace:*",
+    "@sitbench/dashboard": "workspace:*",
+    "commander": "14.0.3",
+    "serve-handler": "6.1.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/serve-handler": "6.1.4",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

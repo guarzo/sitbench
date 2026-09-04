@@ -1,0 +1,39 @@
+{
+  "name": "@sitbench/dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "dist",
+    "dist-lib"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    "./data": {
+      "types": "./dist-lib/data.d.ts",
+      "import": "./dist-lib/data.js"
+    },
+    "./state": {
+      "types": "./dist-lib/state.d.ts",
+      "import": "./dist-lib/state.js"
+    }
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && tsc --project tsconfig.lib.json",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --project tsconfig.check.json --noEmit"
+  },
+  "dependencies": {
+    "@sitbench/core": "workspace:*",
+    "chart.js": "^4.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.9.2",
+    "vite": "6.4.3",
+    "vitest": "^3.2.4"
+  }
+}

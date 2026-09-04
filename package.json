@@ -1,0 +1,20 @@
+{
+  "name": "sitbench",
+  "private": true,
+  "packageManager": "pnpm@10.15.0",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  },
+  "pnpm": {
+    "overrides": {
+      "vite": "6.4.3"
+    }
+  }
+}

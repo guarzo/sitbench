@@ -1,0 +1,14 @@
+------------------------------------------------------------
+  Gamelog
+  Listener: Dah Nee
+------------------------------------------------------------
+[ 2026.09.03 04:51:14 ] (combat) 1183 from Dah Nee[Example] - Heavy Entropic Disintegrator II - Hits Sleepless Guardian
+[ 2026.09.03 04:51:15 ] (combat) 341 from Sleepless Guardian - Hits Dah Nee
+[ 2026.09.03 04:51:16 ] (combat) Your Heavy Entropic Disintegrator II misses Sleepless Guardian completely
+[ 2026.09.03 04:51:17 ] (combat) 250 from Dah Nee[Example] - Heavy Entropic Disintegrator II - Hits Mobile Tractor Unit
+[ 2026.09.03 04:51:18 ] (combat) 99 from Dah Nee[Example] - Heavy Entropic Disintegrator II - Hits Unknown Capsuleer
+[ 2026.09.03 04:51:14 ] (combat) 1183 from Dah Nee[Example] - Heavy Entropic Disintegrator II - Hits Sleepless Guardian
+[ 2026.09.03 04:51:19 ] (combat) 17 from Dah Nee[Example] - Heavy Entropic Disintegrator II - Hits Unknown Contact
+[ 2026.09.03 04:51:20 ] (notify) Mission objective updated
+[ 2026.09.03 04:51:21 ] (combat) Something unsupported but still combat
+[ 2026.99.03 04:51:22 ] (combat) 10 from Sleepless Guardian - Hits Dah Nee
