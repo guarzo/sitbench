@@ -1,5 +1,5 @@
 import { cp, mkdir, readFile, readdir } from 'node:fs/promises';
-import { createServer, type Server } from 'node:http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { Archive, LocalDashboardDatasetSchema, type RunSummary } from '@sitbench/core';
@@ -169,13 +169,57 @@ function classifyDashboardRequest(rawUrl: string | undefined): AllowedDashboardR
 }
 
 /**
+ * Narrow injectable seam for the static-file handler and for observing a
+ * handler failure. Production always uses `serve-handler` and reports the
+ * failure through the command's own `write`; tests use this to drive a
+ * real rejected request through a real HTTP server.
+ */
+export interface DashboardServerDependencies {
+  handler?: (
+    request: IncomingMessage,
+    response: ServerResponse,
+    options: { public: string; directoryListing: boolean },
+  ) => Promise<void>;
+  onError?: (error: unknown) => void;
+}
+
+/**
+ * Completes a request whose handler rejected, without ever ending a
+ * response twice or writing headers after they were already sent: an
+ * already-finished response is left alone, a response that has not sent
+ * headers yet gets a plain 500, and a response that already started
+ * streaming is simply ended. The server itself stays listening, so a
+ * single failed request never takes the dashboard down.
+ */
+function respondWithHandlerFailure(response: ServerResponse): void {
+  if (response.writableEnded) {
+    return;
+  }
+  if (!response.headersSent) {
+    response.statusCode = 500;
+    response.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    response.end('Internal Server Error');
+    return;
+  }
+  response.end();
+}
+
+/**
  * Starts a static file server bound to `127.0.0.1` only -- there is no way
  * to pass a different bind address. `port` defaults to `0` (ephemeral).
  * Requests are pre-validated against an exact allowlist (see
  * `classifyDashboardRequest`) before `serve-handler` ever sees them, and
- * directory listing is disabled as further defense in depth.
+ * directory listing is disabled as further defense in depth. The handler's
+ * promise is always observed: a rejection is turned into a 500 (or a clean
+ * end for an already-started response) and reported through `onError`,
+ * never left floating as an unhandled rejection.
  */
-export async function startDashboardServer(rootDir: string, port = 0): Promise<RunningDashboardServer> {
+export async function startDashboardServer(
+  rootDir: string,
+  port = 0,
+  dependencies: DashboardServerDependencies = {},
+): Promise<RunningDashboardServer> {
+  const handler = dependencies.handler ?? ((request, response, options) => serveHandler(request, response, options));
   const server: Server = createServer((request, response) => {
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       response.statusCode = 405;
@@ -187,7 +231,16 @@ export async function startDashboardServer(rootDir: string, port = 0): Promise<R
       response.end('Not Found');
       return;
     }
-    void serveHandler(request, response, { public: rootDir, directoryListing: false });
+    // The awaited handler runs inside a promise that can never reject, so
+    // this is an observed completion rather than a floating promise.
+    void (async () => {
+      try {
+        await handler(request, response, { public: rootDir, directoryListing: false });
+      } catch (error) {
+        dependencies.onError?.(error);
+        respondWithHandlerFailure(response);
+      }
+    })();
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -243,7 +296,11 @@ export async function runDashboard(
 
   let server: RunningDashboardServer;
   try {
-    server = await startDashboardServer(dashboardDir, arguments_.port ?? 0);
+    server = await startDashboardServer(dashboardDir, arguments_.port ?? 0, {
+      onError: (error) => {
+        write(`Warning: a dashboard request failed: ${message(error)}`);
+      },
+    });
   } catch (error) {
     return fatal(write, `Cannot start the dashboard server: ${message(error)}`);
   }

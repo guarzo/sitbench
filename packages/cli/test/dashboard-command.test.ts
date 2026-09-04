@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import serveHandler from 'serve-handler';
 import { Archive, type RunSummary } from '@sitbench/core';
 import { runDashboard, startDashboardServer } from '../src/dashboard-command.js';
 
@@ -194,6 +195,61 @@ describe('startDashboardServer', () => {
     try {
       const response = await fetch(new URL('assets/evil.js', server.url));
       expect(response.status).toBe(404);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('returns 500 for a rejected static-handler request and keeps serving subsequent requests', async () => {
+    let calls = 0;
+    const errors: unknown[] = [];
+    const server = await startDashboardServer(fakeDistDir, 0, {
+      handler: async (request, response, options) => {
+        calls += 1;
+        if (calls === 1) {
+          throw new Error('handler exploded');
+        }
+        await serveHandler(request, response, options);
+      },
+      onError: (error) => errors.push(error),
+    });
+    try {
+      const failed = await fetch(server.url);
+      expect(failed.status).toBe(500);
+      await failed.text();
+
+      const recovered = await fetch(server.url);
+      expect(recovered.status).toBe(200);
+      expect(await recovered.text()).toContain('sitbench dashboard');
+
+      expect(errors).toHaveLength(1);
+      expect((errors[0] as Error).message).toBe('handler exploded');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('does not double-end or throw when the handler rejects after the response has already started', async () => {
+    let calls = 0;
+    const server = await startDashboardServer(fakeDistDir, 0, {
+      handler: async (request, response, options) => {
+        calls += 1;
+        if (calls === 1) {
+          response.statusCode = 200;
+          response.write('partial');
+          throw new Error('exploded mid-response');
+        }
+        await serveHandler(request, response, options);
+      },
+    });
+    try {
+      const partial = await fetch(server.url);
+      expect(partial.status).toBe(200);
+      expect(await partial.text()).toBe('partial');
+
+      const recovered = await fetch(server.url);
+      expect(recovered.status).toBe(200);
+      expect(await recovered.text()).toContain('sitbench dashboard');
     } finally {
       await server.close();
     }
