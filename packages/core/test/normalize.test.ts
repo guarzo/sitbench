@@ -46,6 +46,24 @@ describe('normalizeLogFile', () => {
     });
   });
 
+  it('keeps ambiguous parsed observations in events while counting them as excluded from qualifying site analysis instead of deleting them from the normalized stream', () => {
+    const result = normalizeLogFile({
+      text: readFixture('damage-session.txt'),
+      sourceFile: 'damage-session.txt',
+    });
+
+    const ambiguousEvents = result.events.filter(
+      (event) => (event.kind === 'damage-dealt' || event.kind === 'miss') && event.targetClassification === 'ambiguous',
+    );
+
+    expect(ambiguousEvents).toHaveLength(2);
+    expect(ambiguousEvents.map((event) => [event.kind, event.target, event.sourceLine])).toEqual([
+      ['damage-dealt', 'Unknown Capsuleer', 9],
+      ['damage-dealt', 'Unknown Contact', 11],
+    ]);
+    expect(result.counts.ambiguousEventsExcluded).toBe(2);
+  });
+
   it('sorts parsed repair events by timestamp then source line instead of preserving out-of-order file order', () => {
     const result = normalizeLogFile({
       text: readFixture('repair-session.txt'),

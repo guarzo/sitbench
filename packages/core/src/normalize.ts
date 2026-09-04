@@ -7,24 +7,43 @@ export interface NormalizeLogInput {
   sourceFile: string;
 }
 
+/**
+ * Coverage counts emitted while normalizing a single log file.
+ *
+ * `ambiguousEventsExcluded` counts parsed ambiguous damage-dealt/miss
+ * observations that remain preserved in `events` with
+ * `targetClassification: 'ambiguous'`. Downstream qualifying site analysis must
+ * filter those preserved events out rather than assuming they were removed from
+ * the normalized event stream.
+ */
+export interface NormalizeCounts {
+  lines: number;
+  combatLines: number;
+  parsedCombatLines: number;
+  unparsedCombatLines: number;
+  malformedLines: number;
+  ambiguousEventsExcluded: number;
+}
+
+/**
+ * Normalized output for one log file.
+ *
+ * `events` preserves every parsed supported observation with full provenance,
+ * including ambiguous observations. Use `counts.ambiguousEventsExcluded` and an
+ * event's `targetClassification` when downstream logic needs to exclude
+ * ambiguous observations from qualifying site analysis.
+ */
 export interface NormalizeLogResult {
   character: string | null;
   events: NormalizedEvent[];
-  counts: {
-    lines: number;
-    combatLines: number;
-    parsedCombatLines: number;
-    unparsedCombatLines: number;
-    malformedLines: number;
-    ambiguousEventsExcluded: number;
-  };
+  counts: NormalizeCounts;
 }
 
 export function normalizeLogFile(input: NormalizeLogInput): NormalizeLogResult {
   const lines = splitLines(input.text);
   const { character } = parseLogHeader(input.text);
   const events: NormalizedEvent[] = [];
-  const counts = {
+  const counts: NormalizeCounts = {
     lines: lines.length,
     combatLines: 0,
     parsedCombatLines: 0,
