@@ -11,15 +11,24 @@ export function formatElapsed(seconds: number): string {
 }
 
 /**
- * Formats a signed delta in seconds. Positive = slower (bad), negative = faster (good).
- * Returns e.g. "+12s" or "-8s" with direction indicator.
+ * Formats a signed duration delta, e.g. "+15s", "-15s", "0s". Only ever used
+ * for metrics measured in seconds; unitless metrics use `formatSignedCount`.
  */
-export function formatDelta(deltaSeconds: number): { text: string; direction: 'faster' | 'slower' | 'same' } {
+export function formatSignedSeconds(deltaSeconds: number): string {
   const rounded = Math.round(deltaSeconds);
-  if (rounded === 0) return { text: '0s', direction: 'same' };
-  const sign = rounded > 0 ? '+' : '';
-  const direction = rounded < 0 ? 'faster' : 'slower';
-  return { text: `${sign}${String(rounded)}s`, direction };
+  if (rounded === 0) return '0s';
+  return `${rounded > 0 ? '+' : ''}${rounded.toLocaleString('en-US')}s`;
+}
+
+/**
+ * Formats a signed unitless delta with locale grouping, e.g. "+37",
+ * "+53,000", "-6,000", "0". Used for DPS and damage deltas, which must never
+ * carry a seconds suffix.
+ */
+export function formatSignedCount(delta: number): string {
+  const rounded = Math.round(delta);
+  if (rounded === 0) return '0';
+  return `${rounded > 0 ? '+' : ''}${rounded.toLocaleString('en-US')}`;
 }
 
 /** Formats DPS as a rounded integer with comma separators. */

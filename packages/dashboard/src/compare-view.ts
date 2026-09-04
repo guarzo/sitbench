@@ -1,6 +1,7 @@
 import type { DashboardCapabilities, DashboardRun } from './data.js';
 import { alignCharacterRows } from './compare.js';
-import { formatDamage, formatDelta, formatDps, formatElapsed, formatPercent, formatShortDate } from './format.js';
+import { createDeltaElement, metricDelta, type DeltaKind, type MetricDelta } from './delta.js';
+import { formatDamage, formatDps, formatElapsed, formatPercent, formatShortDate } from './format.js';
 
 // ---------------------------------------------------------------------------
 // Two-run comparison panel
@@ -29,6 +30,7 @@ export function renderCompare(
   // Selectors row
   const selectorsDiv = el('div', 'compare-selectors');
 
+  const leftField = el('div', 'compare-field compare-field-left');
   const leftLabel = document.createElement('label');
   leftLabel.textContent = 'Run A: ';
   leftLabel.htmlFor = 'compare-left-select';
@@ -36,6 +38,7 @@ export function renderCompare(
   leftSelect.id = 'compare-left-select';
   leftSelect.className = 'compare-select';
 
+  const rightField = el('div', 'compare-field compare-field-right');
   const rightLabel = document.createElement('label');
   rightLabel.textContent = 'Run B: ';
   rightLabel.htmlFor = 'compare-right-select';
@@ -46,7 +49,7 @@ export function renderCompare(
   // Populate selects: most recent first for usability
   const reversed = runs.slice().reverse();
   for (const run of reversed) {
-    const dateLabel = `${formatShortDate(run.window.start)} — ${formatElapsed(run.metrics.elapsedSeconds)}`;
+    const dateLabel = `${formatShortDate(run.window.start)} \u00B7 ${formatElapsed(run.metrics.elapsedSeconds)}`;
 
     const lo = document.createElement('option');
     lo.value = run.id;
@@ -64,10 +67,12 @@ export function renderCompare(
   leftSelect.addEventListener('change', () => onLeftChange(leftSelect.value));
   rightSelect.addEventListener('change', () => onRightChange(rightSelect.value));
 
-  selectorsDiv.appendChild(leftLabel);
-  selectorsDiv.appendChild(leftSelect);
-  selectorsDiv.appendChild(rightLabel);
-  selectorsDiv.appendChild(rightSelect);
+  selectorsDiv.appendChild(leftField);
+  leftField.appendChild(leftLabel);
+  leftField.appendChild(leftSelect);
+  selectorsDiv.appendChild(rightField);
+  rightField.appendChild(rightLabel);
+  rightField.appendChild(rightSelect);
   container.appendChild(selectorsDiv);
 
   // Comparison details
@@ -80,6 +85,11 @@ export function renderCompare(
   }
 
   // Metric comparison table
+  const metricsScroll = el('div', 'compare-scroll');
+  metricsScroll.setAttribute('tabindex', '0');
+  metricsScroll.setAttribute('role', 'group');
+  metricsScroll.setAttribute('aria-label', 'Scrollable metric comparison table');
+
   const metricsTable = document.createElement('table');
   metricsTable.className = 'compare-table';
   const mHead = document.createElement('thead');
@@ -94,32 +104,33 @@ export function renderCompare(
   metricsTable.appendChild(mHead);
 
   const mBody = document.createElement('tbody');
-  const rows: Array<{ label: string; a: string; b: string; delta: string; direction: string }> = [
-    metricRow('Elapsed', leftRun.metrics.elapsedSeconds, rightRun.metrics.elapsedSeconds, formatElapsed, true),
-    metricRow('Active Combat', leftRun.metrics.activeCombatSeconds, rightRun.metrics.activeCombatSeconds, formatElapsed, true),
-    metricRow('Idle', leftRun.metrics.idleSeconds, rightRun.metrics.idleSeconds, formatElapsed, true),
-    metricRow('Fleet DPS', leftRun.metrics.averageFleetDps, rightRun.metrics.averageFleetDps, formatDps, false),
-    metricRow('Active DPS', leftRun.metrics.activeFleetDps, rightRun.metrics.activeFleetDps, formatDps, false),
-    metricRow('Fleet Damage', leftRun.metrics.fleetDamageDealt, rightRun.metrics.fleetDamageDealt, formatDamage, false),
-    metricRow('Damage Taken', leftRun.metrics.damageTaken, rightRun.metrics.damageTaken, formatDamage, false),
+  const rows: CompareRow[] = [
+    metricRow('elapsed', 'Elapsed', leftRun.metrics.elapsedSeconds, rightRun.metrics.elapsedSeconds, formatElapsed, 'duration', true),
+    metricRow('active-combat', 'Active Combat', leftRun.metrics.activeCombatSeconds, rightRun.metrics.activeCombatSeconds, formatElapsed, 'duration', true),
+    metricRow('idle', 'Idle', leftRun.metrics.idleSeconds, rightRun.metrics.idleSeconds, formatElapsed, 'duration', true),
+    metricRow('fleet-dps', 'Fleet DPS', leftRun.metrics.averageFleetDps, rightRun.metrics.averageFleetDps, formatDps, 'count', false),
+    metricRow('active-dps', 'Active DPS', leftRun.metrics.activeFleetDps, rightRun.metrics.activeFleetDps, formatDps, 'count', false),
+    metricRow('fleet-damage', 'Fleet Damage', leftRun.metrics.fleetDamageDealt, rightRun.metrics.fleetDamageDealt, formatDamage, 'count', false),
+    metricRow('damage-taken', 'Damage Taken', leftRun.metrics.damageTaken, rightRun.metrics.damageTaken, formatDamage, 'count', true),
   ];
 
   for (const row of rows) {
     const tr = document.createElement('tr');
+    tr.dataset.metric = row.key;
     for (const text of [row.label, row.a, row.b]) {
       const td = document.createElement('td');
       td.textContent = text;
       tr.appendChild(td);
     }
     const deltaTd = document.createElement('td');
-    deltaTd.textContent = row.delta;
-    deltaTd.className = `delta-${row.direction}`;
-    deltaTd.dataset.cue = row.direction;
+    deltaTd.className = 'compare-delta';
+    deltaTd.appendChild(createDeltaElement(row.delta));
     tr.appendChild(deltaTd);
     mBody.appendChild(tr);
   }
   metricsTable.appendChild(mBody);
-  container.appendChild(metricsTable);
+  metricsScroll.appendChild(metricsTable);
+  container.appendChild(metricsScroll);
 
   // Character comparison — only when capabilities.characters is true
   if (capabilities.characters) {
@@ -175,20 +186,32 @@ export function renderCompare(
   }
 }
 
+interface CompareRow {
+  key: string;
+  label: string;
+  a: string;
+  b: string;
+  delta: MetricDelta;
+}
+
+/**
+ * Builds one comparison row. The delta is always Run A minus Run B; its
+ * direction reflects metric desirability rather than the numeric sign.
+ */
 function metricRow(
+  key: string,
   label: string,
   a: number,
   b: number,
   formatter: (n: number) => string,
+  kind: DeltaKind,
   lowerIsBetter: boolean,
-): { label: string; a: string; b: string; delta: string; direction: string } {
-  const diff = b - a;
-  const delta = formatDelta(lowerIsBetter ? diff : -diff);
+): CompareRow {
   return {
+    key,
     label,
     a: formatter(a),
     b: formatter(b),
-    delta: delta.text,
-    direction: delta.direction,
+    delta: metricDelta(a - b, { kind, lowerIsBetter }),
   };
 }

@@ -1,9 +1,10 @@
 import type { DashboardDataset, DashboardRun } from './data.js';
 import { bestRunUpTo, previousRun, trailingFiveAverage } from './compare.js';
-import { formatDelta, formatDps, formatElapsed } from './format.js';
+import { createDeltaElement, metricDelta } from './delta.js';
+import { formatDps, formatElapsed } from './format.js';
 
 // ---------------------------------------------------------------------------
-// Overview cards: latest elapsed, deltas, fleet metrics
+// Overview band: elapsed leads, elapsed comparisons follow, fleet metrics rest
 // ---------------------------------------------------------------------------
 
 function el(tag: string, cls: string, text?: string): HTMLElement {
@@ -13,22 +14,23 @@ function el(tag: string, cls: string, text?: string): HTMLElement {
   return element;
 }
 
-function card(label: string, value: string, extra?: { delta?: string; direction?: string; ariaLabel?: string }): HTMLElement {
-  const wrapper = el('div', 'overview-card');
-  wrapper.setAttribute('role', 'group');
-  wrapper.setAttribute('aria-label', extra?.ariaLabel ?? label);
+function group(cls: string, ariaLabel: string): HTMLElement {
+  const list = document.createElement('dl');
+  list.className = cls;
+  list.setAttribute('aria-label', ariaLabel);
+  return list;
+}
 
-  wrapper.appendChild(el('span', 'overview-label', label));
-  wrapper.appendChild(el('span', 'overview-value', value));
-
-  if (extra?.delta !== undefined) {
-    const deltaEl = el('span', `overview-delta delta-${extra.direction ?? 'same'}`, extra.delta);
-    // Non-color cue: prefix arrow
-    if (extra.direction === 'faster') deltaEl.dataset.cue = 'faster';
-    if (extra.direction === 'slower') deltaEl.dataset.cue = 'slower';
-    wrapper.appendChild(deltaEl);
-  }
-
+function item(cls: string, label: string, value: HTMLElement): HTMLElement {
+  const wrapper = el('div', `${cls}-item`);
+  const term = document.createElement('dt');
+  term.className = `${cls}-label`;
+  term.textContent = label;
+  const description = document.createElement('dd');
+  description.className = `${cls}-value`;
+  description.appendChild(value);
+  wrapper.appendChild(term);
+  wrapper.appendChild(description);
   return wrapper;
 }
 
@@ -48,48 +50,48 @@ export function renderOverview(
   }
 
   const current = sortedRuns[selectedIndex]!;
+  const elapsed = current.metrics.elapsedSeconds;
+  const band = el('div', 'overview-band');
+
+  // Primary: the selected run's elapsed time.
+  const primary = el('div', 'overview-primary');
+  primary.appendChild(el('span', 'overview-primary-label', 'Elapsed'));
+  primary.appendChild(el('span', 'overview-primary-value', formatElapsed(elapsed)));
+  band.appendChild(primary);
+
+  // Secondary: elapsed comparisons, each delta rendered exactly once.
   const prev = previousRun(sortedRuns, selectedIndex);
   const best = bestRunUpTo(sortedRuns, selectedIndex);
-  const trailingAvg = trailingFiveAverage(sortedRuns, selectedIndex);
+  const comparisons: Array<{ key: string; label: string; baseline: number | null }> = [
+    { key: 'previous', label: 'vs Previous', baseline: prev?.metrics.elapsedSeconds ?? null },
+    { key: 'best', label: 'vs Best', baseline: best?.metrics.elapsedSeconds ?? null },
+    { key: 'trailing-five', label: 'vs Trailing 5', baseline: trailingFiveAverage(sortedRuns, selectedIndex) },
+  ];
 
-  // Primary: elapsed time
-  container.appendChild(card('Elapsed', formatElapsed(current.metrics.elapsedSeconds)));
-
-  // Delta vs previous
-  if (prev !== null) {
-    const delta = current.metrics.elapsedSeconds - prev.metrics.elapsedSeconds;
-    const formatted = formatDelta(delta);
-    container.appendChild(card('vs Previous', formatted.text, {
-      delta: formatted.text,
-      direction: formatted.direction,
-      ariaLabel: `Delta versus previous run: ${formatted.text} (${formatted.direction})`,
-    }));
+  const deltas = group('overview-deltas', 'Elapsed time comparisons');
+  for (const comparison of comparisons) {
+    if (comparison.baseline === null) continue;
+    const delta = metricDelta(elapsed - comparison.baseline, { kind: 'duration', lowerIsBetter: true });
+    const entry = item('overview-delta', comparison.label, createDeltaElement(delta, { showDescription: true }));
+    entry.dataset.comparison = comparison.key;
+    deltas.appendChild(entry);
   }
+  if (deltas.childElementCount > 0) band.appendChild(deltas);
 
-  // Delta vs best
-  if (best !== null) {
-    const delta = current.metrics.elapsedSeconds - best.metrics.elapsedSeconds;
-    const formatted = formatDelta(delta);
-    container.appendChild(card('vs Best', formatted.text, {
-      delta: formatted.text,
-      direction: formatted.direction,
-      ariaLabel: `Delta versus best run: ${formatted.text} (${formatted.direction})`,
-    }));
+  // Tertiary: supporting fleet metrics, quieter than the timing above.
+  const fleet = group('overview-fleet', 'Fleet metrics');
+  const fleetMetrics: Array<{ key: string; label: string; value: string }> = [
+    { key: 'fleet-dps', label: 'Fleet DPS', value: formatDps(current.metrics.averageFleetDps) },
+    { key: 'active-dps', label: 'Active DPS', value: formatDps(current.metrics.activeFleetDps) },
+    { key: 'idle', label: 'Idle', value: formatElapsed(current.metrics.idleSeconds) },
+  ];
+  for (const metric of fleetMetrics) {
+    const value = el('span', 'overview-fleet-number', metric.value);
+    const entry = item('overview-fleet', metric.label, value);
+    entry.dataset.metric = metric.key;
+    fleet.appendChild(entry);
   }
+  band.appendChild(fleet);
 
-  // Delta vs trailing-five average
-  if (trailingAvg !== null) {
-    const delta = current.metrics.elapsedSeconds - trailingAvg;
-    const formatted = formatDelta(delta);
-    container.appendChild(card('vs Trail-5 Avg', formatted.text, {
-      delta: formatted.text,
-      direction: formatted.direction,
-      ariaLabel: `Delta versus trailing five average: ${formatted.text} (${formatted.direction})`,
-    }));
-  }
-
-  // Fleet metrics
-  container.appendChild(card('Fleet DPS', formatDps(current.metrics.averageFleetDps)));
-  container.appendChild(card('Active DPS', formatDps(current.metrics.activeFleetDps)));
-  container.appendChild(card('Idle', formatElapsed(current.metrics.idleSeconds)));
+  container.appendChild(band);
 }

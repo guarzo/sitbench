@@ -34,6 +34,15 @@ function qs(selector: string): HTMLElement {
   return el;
 }
 
+/** Pairs a control with its label so narrow viewports keep them together. */
+function filterField(modifier: string, label: HTMLLabelElement, control: HTMLElement): HTMLElement {
+  const field = document.createElement('div');
+  field.className = `filter-field filter-field-${modifier}`;
+  field.appendChild(label);
+  field.appendChild(control);
+  return field;
+}
+
 // ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
@@ -132,14 +141,10 @@ function renderFilters(dataset: DashboardDataset, current: DashboardState): void
     update();
   });
 
-  filtersEl.appendChild(siteLabel);
-  filtersEl.appendChild(siteSelect);
-  filtersEl.appendChild(profileLabel);
-  filtersEl.appendChild(profileSelect);
-  filtersEl.appendChild(dateFromLabel);
-  filtersEl.appendChild(dateFromInput);
-  filtersEl.appendChild(dateToLabel);
-  filtersEl.appendChild(dateToInput);
+  filtersEl.appendChild(filterField('site', siteLabel, siteSelect));
+  filtersEl.appendChild(filterField('profile', profileLabel, profileSelect));
+  filtersEl.appendChild(filterField('from', dateFromLabel, dateFromInput));
+  filtersEl.appendChild(filterField('to', dateToLabel, dateToInput));
 }
 
 function update(): void {
