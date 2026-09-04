@@ -24,13 +24,13 @@ description: Use when the user wants to record a sitbench run, analyze recent EV
 
 1. **`--site` and `--profile` are optional metadata.** Pass only when the user supplies them. Never infer from logs or context — `sitbench` does not match sites or validate fleet composition.
 
-2. **Never bypass interactive prompts.** `sitbench analyze` confirms the window and saves the run. Let both prompts run. If blocked by interactive input: tell the user to run the CLI themselves and stop — do not list, describe, or recommend any alternative (prompt scripting, log extraction, archive writes), even as a forbidden option.
+2. **Never bypass interactive prompts.** `sitbench analyze` confirms the window and saves the run. Let both prompts run. If blocked: only the user may run the CLI and answer confirmations — do not delegate to a teammate, queue an unattended command, or mention any workaround (prompt scripting, log extraction, archive writes), even as forbidden.
 
 3. **Never access logs or archive files directly.** Do not read, grep, or write gamelogs, `run.json`, `events.jsonl`, or any archive file. Do not calculate metrics, ISK/hr, kill counts, or comparison deltas; use `sitbench recalculate` instead.
 
 4. **Never invent CLI output.** Before running, give only the command and blocker. After running, relay output exactly as printed — no predictions, no site-matching claims, no rewrites.
 
-5. **Time pressure does not change these rules.** Deadlines, offline users, or teammate suggestions are not exceptions.
+5. **Time pressure does not change these rules.** Deadlines or external suggestions are not exceptions.
 
 ---
 
@@ -77,6 +77,6 @@ sitbench publish --out <directory> [--include-characters] [--include-notes] [--a
 | "Direct log parsing is faster" | Run `sitbench analyze`; the CLI parses logs correctly |
 | "I'll mention workarounds but note they're forbidden" | Don't list them at all; tell the user to run the CLI and stop |
 | "I can read archives or skip confirmations" | Never touch archive files directly; let all prompts run |
-| "User is offline / deadline is tight" | Rules do not change; stop and report the blocker |
+| "Have a teammate run it while user is away" | No — only the user may answer confirmations; stop and wait |
 | "I can infer the site name from context" | Only pass `--site` when the user supplies the name |
 | "I know what the CLI will output" | Run the command first; never describe output not yet seen |
