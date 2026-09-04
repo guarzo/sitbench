@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
-import type { DashboardRun } from '../src/data.js';
-import { renderTrends, type ChartFactory, type TrendMetric } from '../src/trends.js';
+import { describe, expect, it } from 'vitest';
+import type { ChartConfiguration } from 'chart.js';
+import { renderTrends, type ChartFactory } from '../src/trends.js';
+import { formatShortDate } from '../src/format.js';
 import type { RunSummary } from '@sitbench/core/export';
 
 function buildTrendRun(overrides: { windowStart: string; id: string; elapsed: number }): RunSummary {
@@ -35,32 +36,71 @@ function buildTrendRun(overrides: { windowStart: string; id: string; elapsed: nu
   };
 }
 
-function makeChartFactory(): { factory: ChartFactory; instances: Array<{ destroyed: boolean }> } {
+function makeChartFactory(): {
+  factory: ChartFactory;
+  instances: Array<{ destroyed: boolean }>;
+  configs: Array<ChartConfiguration<'line'>>;
+} {
   const instances: Array<{ destroyed: boolean }> = [];
-  const factory: ChartFactory = (_canvas, _config) => {
+  const configs: Array<ChartConfiguration<'line'>> = [];
+  const factory: ChartFactory = (_canvas, config) => {
+    configs.push(config);
     const inst = { destroyed: false, destroy() { inst.destroyed = true; } };
     instances.push(inst);
     return inst;
   };
-  return { factory, instances };
+  return { factory, instances, configs };
 }
 
 describe('renderTrends sorting', () => {
-  it('sorts trend data by window.start then id regardless of input order', () => {
+  it('charts labels and data in (window.start, id) order regardless of input order', () => {
     const container = document.createElement('div');
-    const { factory } = makeChartFactory();
-    // Provide runs in reverse chronological order
-    const runB = buildTrendRun({ windowStart: '2026-09-02T10:00:00.000Z', id: 'run-b', elapsed: 500 });
-    const runA = buildTrendRun({ windowStart: '2026-09-01T10:00:00.000Z', id: 'run-a', elapsed: 700 });
+    const { factory, configs } = makeChartFactory();
+    // Deliberately scrambled input: newest first, and an id-tiebreak pair inverted.
+    const late = buildTrendRun({ windowStart: '2026-09-03T10:00:00.000Z', id: 'run-d', elapsed: 400 });
+    const tieB = buildTrendRun({ windowStart: '2026-09-02T10:00:00.000Z', id: 'run-c', elapsed: 500 });
+    const tieA = buildTrendRun({ windowStart: '2026-09-02T10:00:00.000Z', id: 'run-b', elapsed: 550 });
+    const early = buildTrendRun({ windowStart: '2026-09-01T10:00:00.000Z', id: 'run-a', elapsed: 700 });
 
-    renderTrends(container, [runB, runA], 'elapsedSeconds', () => {}, null, { createChart: factory });
+    renderTrends(container, [late, tieB, tieA, early], 'elapsedSeconds', () => {}, null, { createChart: factory });
 
-    // The chart should receive data sorted by window.start (runA first)
-    // We verify by checking the canvas aria-label exists (chart was created)
-    const canvas = container.querySelector('canvas');
-    expect(canvas).not.toBeNull();
-    // The rendered data order should be runA (700) then runB (500)
-    // We'll check this via the chart factory data in production test
+    expect(configs).toHaveLength(1);
+    const config = configs[0]!;
+    // Elapsed values uniquely identify the runs, so the dataset proves ordering:
+    // early (run-a), tieA (run-b), tieB (run-c), late (run-d).
+    expect(config.data.datasets[0]!.data).toEqual([700, 550, 500, 400]);
+    expect(config.data.datasets[0]!.label).toBe('Elapsed (s)');
+    expect(config.data.labels).toEqual([
+      formatShortDate('2026-09-01T10:00:00.000Z'),
+      formatShortDate('2026-09-02T10:00:00.000Z'),
+      formatShortDate('2026-09-02T10:00:00.000Z'),
+      formatShortDate('2026-09-03T10:00:00.000Z'),
+    ]);
+  });
+
+  it('remaps the highlighted point to the sorted position of the selected run', () => {
+    const container = document.createElement('div');
+    const { factory, configs } = makeChartFactory();
+    const late = buildTrendRun({ windowStart: '2026-09-03T10:00:00.000Z', id: 'run-c', elapsed: 400 });
+    const early = buildTrendRun({ windowStart: '2026-09-01T10:00:00.000Z', id: 'run-a', elapsed: 700 });
+
+    // Input index 0 is `late`, which sorts last.
+    renderTrends(container, [late, early], 'elapsedSeconds', () => {}, 0, { createChart: factory });
+
+    const dataset = configs[0]!.data.datasets[0]!;
+    expect(dataset.data).toEqual([700, 400]);
+    expect(dataset.pointRadius).toEqual([3, 6]);
+  });
+
+  it('charts the selected secondary metric', () => {
+    const container = document.createElement('div');
+    const { factory, configs } = makeChartFactory();
+    const run = buildTrendRun({ windowStart: '2026-09-01T10:00:00.000Z', id: 'run-a', elapsed: 700 });
+
+    renderTrends(container, [run], 'idleSeconds', () => {}, null, { createChart: factory });
+
+    expect(configs[0]!.data.datasets[0]!.label).toBe('Idle (s)');
+    expect(configs[0]!.data.datasets[0]!.data).toEqual([10]);
   });
 });
 

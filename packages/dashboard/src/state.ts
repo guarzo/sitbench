@@ -1,4 +1,5 @@
 import type { DashboardDataset, DashboardRun } from './data.js';
+import { comparisonOrder } from './compare.js';
 
 // ---------------------------------------------------------------------------
 // Filter state
@@ -69,13 +70,23 @@ export function matchingRuns(state: DashboardState): DashboardRun[] {
 }
 
 /**
- * Initializes state from a validated dataset. Selects the most recent run's
- * site/profile as the default filter, and that run as the selected run.
- * "Most recent" means last by window.start (dataset is sorted ascending).
+ * The newest run by comparison chronology — `(createdAt, id)` for local runs
+ * and `(comparisonOrder, id)` for public runs. Payload order is never trusted:
+ * a local payload is sorted by `window.start` (which can disagree with
+ * `createdAt` for a re-analyzed run) and a public payload may arrive in any
+ * order at all.
+ */
+export function newestRun(runs: DashboardRun[]): DashboardRun | null {
+  if (runs.length === 0) return null;
+  return runs.reduce((newest, run) => (comparisonOrder(run, newest) > 0 ? run : newest));
+}
+
+/**
+ * Initializes state from a validated dataset. Selects the newest run by
+ * comparison chronology, and that run's site/profile as the default filter.
  */
 export function initializeState(dataset: DashboardDataset): DashboardState {
-  const runs = dataset.runs;
-  const latest = runs.length > 0 ? runs[runs.length - 1]! : null;
+  const latest = newestRun(dataset.runs);
 
   const filter: FilterState = {
     siteKey: latest?.site.key ?? null,
@@ -104,15 +115,16 @@ export function selectedRun(state: DashboardState): DashboardRun | null {
 
 /**
  * Reconciles selectedRunId and compareRunId after filter changes.
- * If selectedRunId is no longer in the matched set, auto-selects the most
- * recent. If compareRunId is no longer in the matched set, clears it.
+ * If selectedRunId is no longer in the matched set, auto-selects the newest
+ * matched run by comparison chronology. If compareRunId is no longer in the
+ * matched set, clears it.
  */
 export function reconcileSelections(state: DashboardState): void {
   const matched = matchingRuns(state);
   const matchedIds = new Set(matched.map((r) => r.id));
 
   if (state.selectedRunId !== null && !matchedIds.has(state.selectedRunId)) {
-    state.selectedRunId = matched.length > 0 ? matched[matched.length - 1]!.id : null;
+    state.selectedRunId = newestRun(matched)?.id ?? null;
   }
 
   if (state.compareRunId !== null && !matchedIds.has(state.compareRunId)) {

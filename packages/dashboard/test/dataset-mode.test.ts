@@ -404,4 +404,122 @@ describe('public capability/field consistency via validateDataset', () => {
     });
     expect(ds.mode).toBe('public');
   });
+
+  it('accepts characters=true and notes=true with both gated field groups present', () => {
+    const ds = validateDataset({
+      schemaVersion: 1, mode: 'public',
+      generatedAt: '2026-09-01T10:00:00.000Z',
+      capabilities: { characters: true, notes: true },
+      runs: [{ ...publicBase(), ...charFields, notes: 'a note' }],
+    });
+    expect(ds.mode).toBe('public');
+    const run = ds.runs[0] as PublicRunSummary;
+    expect(run.participants).toEqual(['Alpha']);
+    expect(run.characterMetrics).toHaveLength(1);
+    expect(run.notes).toBe('a note');
+  });
+
+  it('accepts every capability combination when the gated fields match exactly', () => {
+    const combinations: Array<{ capabilities: DashboardCapabilities; run: Record<string, unknown> }> = [
+      { capabilities: { characters: false, notes: false }, run: { ...publicBase() } },
+      { capabilities: { characters: true, notes: false }, run: { ...publicBase(), ...charFields } },
+      { capabilities: { characters: false, notes: true }, run: { ...publicBase(), notes: null } },
+      { capabilities: { characters: true, notes: true }, run: { ...publicBase(), ...charFields, notes: 'note' } },
+    ];
+
+    for (const { capabilities, run } of combinations) {
+      const ds = validateDataset({
+        schemaVersion: 1, mode: 'public',
+        generatedAt: '2026-09-01T10:00:00.000Z',
+        capabilities,
+        runs: [run],
+      });
+      expect(ds.capabilities).toEqual(capabilities);
+      expect(ds.runs).toHaveLength(1);
+    }
+  });
+});
+
+/**
+ * A gated key that is *present* with the value `undefined` is not the same as
+ * an absent key. `JSON.parse` never produces one, but any in-memory dataset
+ * handed to `validateDataset` (a Task 8 public builder, a test double, a
+ * hand-assembled object) can. The privacy contract must hold at that boundary
+ * too: a disabled capability must reject the key even when its value is
+ * `undefined`, and an enabled capability must reject `undefined` as a value.
+ */
+describe('public wire boundary: explicitly present undefined gated keys', () => {
+  function publicBase() {
+    return {
+      id: 'r1',
+      comparisonOrder: 0,
+      site: { name: 'S', key: 's' },
+      fleetProfile: { id: 'p', name: 'P' },
+      window: { start: '2026-09-01T10:00:00.000Z', end: '2026-09-01T10:10:00.000Z', source: 'test', manuallyAdjusted: false },
+      calculation: { episodeThresholdSeconds: 180, activeCombatGapSeconds: 30 },
+      metrics: { elapsedSeconds: 600, activeCombatSeconds: 540, idleSeconds: 60, fleetDamageDealt: 0, averageFleetDps: 0, activeFleetDps: 0, damageTaken: 0, remoteRepairDelivered: 0, participantCount: 0 },
+      coverage: { logFiles: 0, participantsWithOutgoingDamage: 0, unparsedCombatLines: 0, ambiguousEventsExcluded: 0, repairPairing: 'none' },
+    };
+  }
+
+  const characterMetrics = [{
+    character: 'Alpha', damageDealt: 0, fleetDamageShare: 0, averageDps: 0, activeDps: 0,
+    damageTaken: 0, remoteRepairDelivered: 0, remoteRepairReceived: 0,
+    shotsHit: 0, shotsMissed: 0, missRate: 0, hitQualityCounts: {},
+    firstRelevantEvent: null, lastRelevantEvent: null,
+  }];
+
+  function parsePublic(capabilities: DashboardCapabilities, run: Record<string, unknown>): () => DashboardDataset {
+    return () => validateDataset({
+      schemaVersion: 1, mode: 'public',
+      generatedAt: '2026-09-01T10:00:00.000Z',
+      capabilities,
+      runs: [run],
+    });
+  }
+
+  it('confirms the fixtures really carry the key with an undefined value', () => {
+    const run = { ...publicBase(), participants: undefined };
+    expect(Object.prototype.hasOwnProperty.call(run, 'participants')).toBe(true);
+    expect(run.participants).toBeUndefined();
+  });
+
+  it('rejects characters=false when participants is present with value undefined', () => {
+    expect(parsePublic({ characters: false, notes: false }, { ...publicBase(), participants: undefined })).toThrow(DatasetSchemaError);
+  });
+
+  it('rejects characters=false when characterMetrics is present with value undefined', () => {
+    expect(parsePublic({ characters: false, notes: false }, { ...publicBase(), characterMetrics: undefined })).toThrow(DatasetSchemaError);
+  });
+
+  it('rejects notes=false when notes is present with value undefined', () => {
+    expect(parsePublic({ characters: false, notes: false }, { ...publicBase(), notes: undefined })).toThrow(DatasetSchemaError);
+  });
+
+  it('rejects characters=true when participants is present with value undefined', () => {
+    expect(parsePublic({ characters: true, notes: false }, { ...publicBase(), participants: undefined, characterMetrics })).toThrow(DatasetSchemaError);
+  });
+
+  it('rejects characters=true when characterMetrics is present with value undefined', () => {
+    expect(parsePublic({ characters: true, notes: false }, { ...publicBase(), participants: ['Alpha'], characterMetrics: undefined })).toThrow(DatasetSchemaError);
+  });
+
+  it('rejects notes=true when notes is present with value undefined', () => {
+    expect(parsePublic({ characters: false, notes: true }, { ...publicBase(), notes: undefined })).toThrow(DatasetSchemaError);
+  });
+
+  it('rejects characters=true, notes=true when both gated groups are present with undefined values', () => {
+    expect(parsePublic({ characters: true, notes: true }, {
+      ...publicBase(), participants: undefined, characterMetrics: undefined, notes: undefined,
+    })).toThrow(DatasetSchemaError);
+  });
+
+  it('rejects a local dataset whose run carries a present-undefined unknown key', () => {
+    expect(() => validateDataset({
+      schemaVersion: 1, mode: 'local',
+      generatedAt: '2026-09-01T10:00:00.000Z',
+      capabilities: { characters: true, notes: true },
+      runs: [{ ...publicBase(), comparisonOrder: undefined }],
+    })).toThrow(DatasetSchemaError);
+  });
 });

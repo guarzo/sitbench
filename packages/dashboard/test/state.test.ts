@@ -1,18 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import type { LocalDashboardDataset } from '../src/data.js';
+import type { LocalDashboardDataset, PublicDashboardDataset, PublicRunSummary } from '../src/data.js';
 import { initializeState, matchingRuns, profileOptions, reconcileSelections, selectedRun, siteOptions } from '../src/state.js';
 import type { RunSummary } from '@sitbench/core';
 
 let idCounter = 0;
 
-function buildRun(overrides: { windowStart: string; siteKey?: string; siteName?: string; profileId?: string; profileName?: string; elapsed?: number }): RunSummary {
+function buildRun(overrides: { windowStart: string; id?: string; createdAt?: string; siteKey?: string; siteName?: string; profileId?: string; profileName?: string; elapsed?: number }): RunSummary {
   idCounter += 1;
   const windowEnd = new Date(Date.parse(overrides.windowStart) + 600_000).toISOString();
   return {
     schemaVersion: 1,
     parserVersion: '0.1.0',
     metricsVersion: '0.1.0',
-    id: `run-${idCounter}`,
+    id: overrides.id ?? `run-${idCounter}`,
     site: { name: overrides.siteName ?? 'Core Bastion', key: overrides.siteKey ?? 'core-bastion' },
     fleetProfile: { id: overrides.profileId ?? 'default-profile', name: overrides.profileName ?? 'Default Profile' },
     window: { start: overrides.windowStart, end: windowEnd, source: 'outgoing-npc-damage', manuallyAdjusted: false },
@@ -48,8 +48,8 @@ function buildRun(overrides: { windowStart: string; siteKey?: string; siteName?:
     coverage: { logFiles: 1, participantsWithOutgoingDamage: 1, unparsedCombatLines: 0, ambiguousEventsExcluded: 0, repairPairing: 'full' },
     notes: null,
     fingerprint: `fp-${idCounter}`,
-    createdAt: overrides.windowStart,
-    updatedAt: overrides.windowStart,
+    createdAt: overrides.createdAt ?? overrides.windowStart,
+    updatedAt: overrides.createdAt ?? overrides.windowStart,
   };
 }
 
@@ -59,6 +59,47 @@ function buildDataset(runs: RunSummary[]): LocalDashboardDataset {
     mode: 'local',
     generatedAt: new Date().toISOString(),
     capabilities: { characters: true, notes: true },
+    runs,
+  };
+}
+
+function buildPublicRun(overrides: {
+  id: string;
+  comparisonOrder: number;
+  windowStart?: string;
+  siteKey?: string;
+  profileId?: string;
+}): PublicRunSummary {
+  const windowStart = overrides.windowStart ?? '2026-09-01T10:00:00.000Z';
+  const windowEnd = new Date(Date.parse(windowStart) + 600_000).toISOString();
+  return {
+    id: overrides.id,
+    comparisonOrder: overrides.comparisonOrder,
+    site: { name: 'Core Bastion', key: overrides.siteKey ?? 'core-bastion' },
+    fleetProfile: { id: overrides.profileId ?? 'default-profile', name: 'Default Profile' },
+    window: { start: windowStart, end: windowEnd, source: 'outgoing-npc-damage', manuallyAdjusted: false },
+    calculation: { episodeThresholdSeconds: 180, activeCombatGapSeconds: 30 },
+    metrics: {
+      elapsedSeconds: 600,
+      activeCombatSeconds: 540,
+      idleSeconds: 60,
+      fleetDamageDealt: 120000,
+      averageFleetDps: 200,
+      activeFleetDps: 222,
+      damageTaken: 30000,
+      remoteRepairDelivered: 5000,
+      participantCount: 1,
+    },
+    coverage: { logFiles: 1, participantsWithOutgoingDamage: 1, unparsedCombatLines: 0, ambiguousEventsExcluded: 0, repairPairing: 'full' },
+  };
+}
+
+function buildPublicDataset(runs: PublicRunSummary[]): PublicDashboardDataset {
+  return {
+    schemaVersion: 1,
+    mode: 'public',
+    generatedAt: new Date().toISOString(),
+    capabilities: { characters: false, notes: false },
     runs,
   };
 }
@@ -83,6 +124,64 @@ describe('initializeState', () => {
     expect(state.filter.siteKey).toBeNull();
     expect(state.filter.fleetProfileId).toBeNull();
     expect(state.selectedRunId).toBeNull();
+  });
+
+  it('selects the newest local run by (createdAt, id) when payload order ends with an older run', () => {
+    // Payload order is window.start ascending (what buildLocalDashboardDataset emits),
+    // but the chronologically newest run by createdAt is the FIRST payload item.
+    const newest = buildRun({
+      id: 'run-newest',
+      windowStart: '2026-09-01T10:00:00.000Z',
+      createdAt: '2026-09-05T00:00:00.000Z',
+      siteKey: 'site-newest',
+      profileId: 'profile-newest',
+    });
+    const older = buildRun({
+      id: 'run-older',
+      windowStart: '2026-09-02T10:00:00.000Z',
+      createdAt: '2026-09-03T00:00:00.000Z',
+      siteKey: 'site-older',
+      profileId: 'profile-older',
+    });
+    const state = initializeState(buildDataset([newest, older]));
+
+    expect(state.selectedRunId).toBe('run-newest');
+    expect(state.filter.siteKey).toBe('site-newest');
+    expect(state.filter.fleetProfileId).toBe('profile-newest');
+  });
+
+  it('breaks equal local createdAt by run id, independent of payload order', () => {
+    const runB = buildRun({ id: 'run-b', windowStart: '2026-09-01T10:00:00.000Z', createdAt: '2026-09-01T10:00:00.000Z', siteKey: 'site-b', profileId: 'profile-b' });
+    const runA = buildRun({ id: 'run-a', windowStart: '2026-09-01T10:00:00.000Z', createdAt: '2026-09-01T10:00:00.000Z', siteKey: 'site-a', profileId: 'profile-a' });
+    const state = initializeState(buildDataset([runB, runA]));
+
+    expect(state.selectedRunId).toBe('run-b');
+    expect(state.filter.siteKey).toBe('site-b');
+    expect(state.filter.fleetProfileId).toBe('profile-b');
+  });
+
+  it('selects the newest public run by comparisonOrder regardless of payload order', () => {
+    const dataset = buildPublicDataset([
+      buildPublicRun({ id: 'p-mid', comparisonOrder: 1, siteKey: 'site-mid', profileId: 'profile-mid' }),
+      buildPublicRun({ id: 'p-newest', comparisonOrder: 2, siteKey: 'site-newest', profileId: 'profile-newest' }),
+      buildPublicRun({ id: 'p-oldest', comparisonOrder: 0, siteKey: 'site-oldest', profileId: 'profile-oldest' }),
+    ]);
+    const state = initializeState(dataset);
+
+    expect(state.selectedRunId).toBe('p-newest');
+    expect(state.filter.siteKey).toBe('site-newest');
+    expect(state.filter.fleetProfileId).toBe('profile-newest');
+  });
+
+  it('breaks equal public comparisonOrder by run id, independent of payload order', () => {
+    const dataset = buildPublicDataset([
+      buildPublicRun({ id: 'p-b', comparisonOrder: 3, siteKey: 'site-b', profileId: 'profile-b' }),
+      buildPublicRun({ id: 'p-a', comparisonOrder: 3, siteKey: 'site-a', profileId: 'profile-a' }),
+    ]);
+    const state = initializeState(dataset);
+
+    expect(state.selectedRunId).toBe('p-b');
+    expect(state.filter.siteKey).toBe('site-b');
   });
 });
 
@@ -219,5 +318,59 @@ describe('reconcileSelections', () => {
 
     expect(state.selectedRunId).toBe(runA.id);
     expect(state.compareRunId).toBe(runB.id);
+  });
+
+  it('re-selects the newest matched local run by (createdAt, id), not the last matched payload item', () => {
+    const dropped = buildRun({ id: 'run-dropped', windowStart: '2026-08-30T10:00:00.000Z', createdAt: '2026-08-30T10:00:00.000Z', siteKey: 'site-other' });
+    // Within site-a, the newest by createdAt sits EARLIER in payload (window.start) order.
+    const newest = buildRun({ id: 'run-newest', windowStart: '2026-09-01T10:00:00.000Z', createdAt: '2026-09-09T00:00:00.000Z', siteKey: 'site-a' });
+    const older = buildRun({ id: 'run-older', windowStart: '2026-09-02T10:00:00.000Z', createdAt: '2026-09-03T00:00:00.000Z', siteKey: 'site-a' });
+    const state = initializeState(buildDataset([dropped, newest, older]));
+    state.selectedRunId = 'run-dropped';
+    state.compareRunId = 'run-dropped';
+    state.filter.siteKey = 'site-a';
+    state.filter.fleetProfileId = null;
+
+    reconcileSelections(state);
+
+    expect(state.selectedRunId).toBe('run-newest');
+    expect(state.compareRunId).toBeNull();
+  });
+
+  it('re-selects the newest matched public run by (comparisonOrder, id), not the last matched payload item', () => {
+    const dataset = buildPublicDataset([
+      buildPublicRun({ id: 'p-dropped', comparisonOrder: 9, siteKey: 'site-other' }),
+      buildPublicRun({ id: 'p-newest', comparisonOrder: 5, siteKey: 'site-a' }),
+      buildPublicRun({ id: 'p-older', comparisonOrder: 1, siteKey: 'site-a' }),
+    ]);
+    const state = initializeState(dataset);
+    state.selectedRunId = 'p-dropped';
+    state.compareRunId = 'p-dropped';
+    state.filter.siteKey = 'site-a';
+    state.filter.fleetProfileId = null;
+
+    reconcileSelections(state);
+
+    expect(state.selectedRunId).toBe('p-newest');
+    expect(state.compareRunId).toBeNull();
+  });
+
+  it('re-selects the newest run remaining after a date-range filter reconciliation', () => {
+    const inRangeOlder = buildRun({ id: 'run-in-older', windowStart: '2026-09-04T10:00:00.000Z', createdAt: '2026-09-04T10:00:00.000Z', siteKey: 'site-a' });
+    const inRangeNewest = buildRun({ id: 'run-in-newest', windowStart: '2026-09-05T10:00:00.000Z', createdAt: '2026-09-06T10:00:00.000Z', siteKey: 'site-a' });
+    const outOfRange = buildRun({ id: 'run-out', windowStart: '2026-09-20T10:00:00.000Z', createdAt: '2026-09-20T10:00:00.000Z', siteKey: 'site-a' });
+    const state = initializeState(buildDataset([inRangeOlder, inRangeNewest, outOfRange]));
+    state.filter.siteKey = 'site-a';
+    state.filter.fleetProfileId = null;
+    state.selectedRunId = 'run-out';
+    state.compareRunId = 'run-out';
+    state.filter.dateFrom = '2026-09-03';
+    state.filter.dateTo = '2026-09-07';
+
+    reconcileSelections(state);
+
+    expect(matchingRuns(state).map((run) => run.id)).toEqual(['run-in-older', 'run-in-newest']);
+    expect(state.selectedRunId).toBe('run-in-newest');
+    expect(state.compareRunId).toBeNull();
   });
 });

@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  vite: ^6.3.5
+  vite: 6.4.3
 
 importers:
 
@@ -75,7 +75,7 @@ importers:
         specifier: ^5.9.2
         version: 5.9.3
       vite:
-        specifier: ^6.3.5
+        specifier: 6.4.3
         version: 6.4.3(@types/node@22.20.1)
       vitest:
         specifier: ^3.2.4
@@ -560,7 +560,7 @@ packages:
     resolution: {integrity: sha512-Trr0hYO9CM3Wj6ksWHRhK9IZpIY6wTMO5u/MqXurMxT57sWBaOPEtP3Oq60ihZuh5JsiagKfz95OcxdEP6dBrA==}
     peerDependencies:
       msw: ^2.4.9
-      vite: ^6.3.5
+      vite: 6.4.3
     peerDependenciesMeta:
       msw:
         optional: true
