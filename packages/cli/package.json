@@ -10,7 +10,7 @@
     "build": "pnpm --filter \"@sitbench/dashboard...\" build && tsc --project tsconfig.json",
     "test": "pnpm --filter \"@sitbench/dashboard...\" build && vitest run",
     "vitest": "vitest",
-    "typecheck": "tsc --project tsconfig.json --noEmit"
+    "typecheck": "pnpm --filter \"@sitbench/dashboard...\" build && tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {
     "@inquirer/prompts": "7.10.1",
