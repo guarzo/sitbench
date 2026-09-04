@@ -22,8 +22,8 @@
     "dev": "vite",
     "build": "vite build && tsc --project tsconfig.lib.json",
     "preview": "vite preview",
-    "test": "vitest run",
-    "typecheck": "tsc --project tsconfig.check.json --noEmit"
+    "test": "pnpm --filter \"@sitbench/core\" build && vitest run",
+    "typecheck": "pnpm --filter \"@sitbench/core\" build && tsc --project tsconfig.check.json --noEmit"
   },
   "dependencies": {
     "@sitbench/core": "workspace:*",
