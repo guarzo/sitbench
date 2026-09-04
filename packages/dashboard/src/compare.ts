@@ -8,7 +8,12 @@ import type { DashboardRun } from './data.js';
 /**
  * Comparison order for local runs: `(createdAt, id)`, matching core's
  * `compareMatchingRuns`. Local RunSummary always has createdAt. Public runs
- * have `comparisonOrder` instead — callers use that field directly.
+ * have `comparisonOrder` instead, but that ordinal is only meaningful within
+ * the same `(site.key, fleetProfile.id)` group -- core's assignComparisonOrder
+ * assigns it per group, restarting from 0 in every group. Comparing it across
+ * different groups is meaningless (an older group's run can have a higher
+ * ordinal than a newer group's), so cross-group public comparisons fall back
+ * to `(window.start, id)` -- public payloads intentionally omit createdAt.
  */
 export function comparisonOrder(a: DashboardRun, b: DashboardRun): number {
   // Local runs (have createdAt)
@@ -17,9 +22,14 @@ export function comparisonOrder(a: DashboardRun, b: DashboardRun): number {
     if (cmp !== 0) return cmp;
     return a.id.localeCompare(b.id);
   }
-  // Public runs (have comparisonOrder)
+  // Public runs (have comparisonOrder), only comparable within the same group.
   if ('comparisonOrder' in a && 'comparisonOrder' in b) {
-    const cmp = (a as { comparisonOrder: number }).comparisonOrder - (b as { comparisonOrder: number }).comparisonOrder;
+    if (a.site.key === b.site.key && a.fleetProfile.id === b.fleetProfile.id) {
+      const cmp = (a as { comparisonOrder: number }).comparisonOrder - (b as { comparisonOrder: number }).comparisonOrder;
+      if (cmp !== 0) return cmp;
+      return a.id.localeCompare(b.id);
+    }
+    const cmp = a.window.start.localeCompare(b.window.start);
     if (cmp !== 0) return cmp;
     return a.id.localeCompare(b.id);
   }

@@ -160,17 +160,46 @@ describe('initializeState', () => {
     expect(state.filter.fleetProfileId).toBe('profile-b');
   });
 
-  it('selects the newest public run by comparisonOrder regardless of payload order', () => {
+  it('selects the newest public run within a single group by comparisonOrder regardless of payload order', () => {
+    // All three share the same default site/profile group; only comparisonOrder
+    // (and payload position) differ, proving selection ignores payload order.
     const dataset = buildPublicDataset([
-      buildPublicRun({ id: 'p-mid', comparisonOrder: 1, siteKey: 'site-mid', profileId: 'profile-mid' }),
-      buildPublicRun({ id: 'p-newest', comparisonOrder: 2, siteKey: 'site-newest', profileId: 'profile-newest' }),
-      buildPublicRun({ id: 'p-oldest', comparisonOrder: 0, siteKey: 'site-oldest', profileId: 'profile-oldest' }),
+      buildPublicRun({ id: 'p-mid', comparisonOrder: 1 }),
+      buildPublicRun({ id: 'p-newest', comparisonOrder: 2 }),
+      buildPublicRun({ id: 'p-oldest', comparisonOrder: 0 }),
     ]);
     const state = initializeState(dataset);
 
     expect(state.selectedRunId).toBe('p-newest');
-    expect(state.filter.siteKey).toBe('site-newest');
-    expect(state.filter.fleetProfileId).toBe('profile-newest');
+    expect(state.filter.siteKey).toBe('core-bastion');
+    expect(state.filter.fleetProfileId).toBe('default-profile');
+  });
+
+  it('selects the newest run across DIFFERENT site/profile groups by (window.start, id), not by comparisonOrder, which restarts per group', () => {
+    // Mirrors the reported regression: an August group's run (comparisonOrder 9)
+    // must not outrank a chronologically newer September group's run
+    // (comparisonOrder 0) just because its per-group ordinal is higher.
+    const dataset = buildPublicDataset([
+      buildPublicRun({
+        id: 'p-august-order9',
+        comparisonOrder: 9,
+        windowStart: '2026-08-15T10:00:00.000Z',
+        siteKey: 'site-a',
+        profileId: 'profile-a',
+      }),
+      buildPublicRun({
+        id: 'p-september-order0',
+        comparisonOrder: 0,
+        windowStart: '2026-09-01T10:00:00.000Z',
+        siteKey: 'site-b',
+        profileId: 'profile-b',
+      }),
+    ]);
+    const state = initializeState(dataset);
+
+    expect(state.selectedRunId).toBe('p-september-order0');
+    expect(state.filter.siteKey).toBe('site-b');
+    expect(state.filter.fleetProfileId).toBe('profile-b');
   });
 
   it('breaks equal public comparisonOrder by run id, independent of payload order', () => {
@@ -352,6 +381,48 @@ describe('reconcileSelections', () => {
     reconcileSelections(state);
 
     expect(state.selectedRunId).toBe('p-newest');
+    expect(state.compareRunId).toBeNull();
+  });
+
+  it('re-selects the newest matched public run across mixed groups by (window.start, id) when the filter admits multiple groups, not by comparisonOrder', () => {
+    // Filter is wide open (no site/profile selected), so the matched set spans
+    // two different groups. comparisonOrder is only meaningful within a group,
+    // so cross-group reconciliation must fall back to (window.start, id).
+    const dataset = buildPublicDataset([
+      buildPublicRun({
+        id: 'p-dropped',
+        comparisonOrder: 20,
+        windowStart: '2026-09-10T10:00:00.000Z',
+        siteKey: 'site-dropped',
+        profileId: 'profile-dropped',
+      }),
+      buildPublicRun({
+        id: 'p-august-high-ordinal',
+        comparisonOrder: 9,
+        windowStart: '2026-08-15T10:00:00.000Z',
+        siteKey: 'site-a',
+        profileId: 'profile-a',
+      }),
+      buildPublicRun({
+        id: 'p-september-low-ordinal',
+        comparisonOrder: 0,
+        windowStart: '2026-09-01T10:00:00.000Z',
+        siteKey: 'site-b',
+        profileId: 'profile-b',
+      }),
+    ]);
+    const state = initializeState(dataset);
+    state.selectedRunId = 'p-dropped';
+    state.compareRunId = 'p-dropped';
+    state.filter.siteKey = null;
+    state.filter.fleetProfileId = null;
+    state.filter.dateFrom = '2026-08-01';
+    state.filter.dateTo = '2026-09-05';
+
+    reconcileSelections(state);
+
+    expect(matchingRuns(state).map((run) => run.id).sort()).toEqual(['p-august-high-ordinal', 'p-september-low-ordinal']);
+    expect(state.selectedRunId).toBe('p-september-low-ordinal');
     expect(state.compareRunId).toBeNull();
   });
 

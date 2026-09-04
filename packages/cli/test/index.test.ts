@@ -1,5 +1,7 @@
-import { relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, relative } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { createProgram, isDirectEntryPoint, runCli, waitForShutdownSignal } from '../src/index.js';
 
@@ -10,6 +12,57 @@ describe('isDirectEntryPoint', () => {
 
     expect(isDirectEntryPoint(import.meta.url, equivalentArgvPath)).toBe(true);
     expect(isDirectEntryPoint(import.meta.url, `${modulePath}.other`)).toBe(false);
+  });
+
+  it('returns false when argv path is undefined', () => {
+    expect(isDirectEntryPoint(import.meta.url, undefined)).toBe(false);
+  });
+
+  it('matches when argv path is a real symlink to the resolved module path -- the `pnpm link --global` workflow', () => {
+    // `pnpm link --global` installs a bin symlink whose argv[1] is the symlink
+    // path itself, not the real file it points to. A lexical string compare
+    // between the module's real path and that symlink path always fails, so
+    // the entrypoint silently never runs. isDirectEntryPoint must canonicalize
+    // both sides (e.g. via realpath) before comparing.
+    const dir = mkdtempSync(join(tmpdir(), 'sitbench-entrypoint-'));
+    try {
+      const realFile = join(dir, 'index.js');
+      const symlinkPath = join(dir, 'sitbench-global-link.js');
+      writeFileSync(realFile, '// entrypoint stub\n');
+      symlinkSync(realFile, symlinkPath);
+
+      expect(isDirectEntryPoint(pathToFileURL(realFile).href, symlinkPath)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not match a symlink that resolves to a different real file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sitbench-entrypoint-'));
+    try {
+      const realFile = join(dir, 'index.js');
+      const otherFile = join(dir, 'other.js');
+      const symlinkPath = join(dir, 'sitbench-global-link.js');
+      writeFileSync(realFile, '// entrypoint stub\n');
+      writeFileSync(otherFile, '// unrelated stub\n');
+      symlinkSync(otherFile, symlinkPath);
+
+      expect(isDirectEntryPoint(pathToFileURL(realFile).href, symlinkPath)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns false for a nonexistent argv path instead of throwing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sitbench-entrypoint-'));
+    try {
+      const realFile = join(dir, 'index.js');
+      writeFileSync(realFile, '// entrypoint stub\n');
+
+      expect(isDirectEntryPoint(pathToFileURL(realFile).href, join(dir, 'does-not-exist.js'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

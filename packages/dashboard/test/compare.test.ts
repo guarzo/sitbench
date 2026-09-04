@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { alignCharacterRows, bestRunUpTo, comparisonOrder, previousRun, trailingFiveAverage, trailingFiveRuns } from '../src/compare.js';
 import { compareMatchingRuns, type CharacterMetrics, type RunSummary } from '@sitbench/core';
-import type { DashboardRun } from '../src/data.js';
+import type { DashboardRun, PublicRunSummary } from '../src/data.js';
 
 let idCounter = 0;
 
@@ -50,6 +50,36 @@ function buildRun(overrides: { windowStart: string; elapsed?: number }): RunSumm
     fingerprint: `fp-${idCounter}`,
     createdAt: overrides.windowStart,
     updatedAt: overrides.windowStart,
+  };
+}
+
+function buildPublicRun(overrides: {
+  id: string;
+  comparisonOrder: number;
+  windowStart: string;
+  siteKey?: string;
+  profileId?: string;
+}): PublicRunSummary {
+  const windowEnd = new Date(Date.parse(overrides.windowStart) + 600_000).toISOString();
+  return {
+    id: overrides.id,
+    comparisonOrder: overrides.comparisonOrder,
+    site: { name: 'Core Bastion', key: overrides.siteKey ?? 'core-bastion' },
+    fleetProfile: { id: overrides.profileId ?? 'default-profile', name: 'Default Profile' },
+    window: { start: overrides.windowStart, end: windowEnd, source: 'outgoing-npc-damage', manuallyAdjusted: false },
+    calculation: { episodeThresholdSeconds: 180, activeCombatGapSeconds: 30 },
+    metrics: {
+      elapsedSeconds: 600,
+      activeCombatSeconds: 540,
+      idleSeconds: 60,
+      fleetDamageDealt: 120000,
+      averageFleetDps: 200,
+      activeFleetDps: 222,
+      damageTaken: 30000,
+      remoteRepairDelivered: 5000,
+      participantCount: 1,
+    },
+    coverage: { logFiles: 1, participantsWithOutgoingDamage: 1, unparsedCombatLines: 0, ambiguousEventsExcluded: 0, repairPairing: 'full' },
   };
 }
 
@@ -224,5 +254,50 @@ describe('comparisonOrder for local runs', () => {
 
     // So previous of runA (index 1) should be runB (index 0)
     expect(previousRun(ordered, 1)?.id).toBe(runB.id);
+  });
+});
+
+describe('comparisonOrder for public runs', () => {
+  it('orders same-group public runs by comparisonOrder, matching the assignComparisonOrder chronology within a (site.key, fleetProfile.id) group', () => {
+    const later = buildPublicRun({ id: 'p-later', comparisonOrder: 5, windowStart: '2026-09-01T10:00:00.000Z' });
+    const earlier = buildPublicRun({ id: 'p-earlier', comparisonOrder: 1, windowStart: '2026-09-02T10:00:00.000Z' });
+
+    const ordered = [later, earlier].sort(comparisonOrder);
+    expect(ordered.map((r) => r.id)).toEqual(['p-earlier', 'p-later']);
+  });
+
+  it('does NOT compare comparisonOrder across different (site.key, fleetProfile.id) groups -- it restarts per group, so a high ordinal in an older group must not beat a low ordinal in a newer group', () => {
+    // Mirrors the reported regression: an August group's last run (comparisonOrder 9)
+    // must not outrank a September group's first run (comparisonOrder 0). Public
+    // payloads intentionally omit createdAt, so cross-group chronology falls back
+    // to (window.start, id).
+    const augustGroupOrder9 = buildPublicRun({
+      id: 'p-august-order9',
+      comparisonOrder: 9,
+      windowStart: '2026-08-15T10:00:00.000Z',
+      siteKey: 'site-a',
+      profileId: 'profile-a',
+    });
+    const septemberGroupOrder0 = buildPublicRun({
+      id: 'p-september-order0',
+      comparisonOrder: 0,
+      windowStart: '2026-09-01T10:00:00.000Z',
+      siteKey: 'site-b',
+      profileId: 'profile-b',
+    });
+
+    expect(comparisonOrder(augustGroupOrder9, septemberGroupOrder0)).toBeLessThan(0);
+    expect(comparisonOrder(septemberGroupOrder0, augustGroupOrder9)).toBeGreaterThan(0);
+
+    const ordered = [augustGroupOrder9, septemberGroupOrder0].sort(comparisonOrder);
+    expect(ordered.map((r) => r.id)).toEqual(['p-august-order9', 'p-september-order0']);
+  });
+
+  it('breaks equal cross-group window.start ties by id', () => {
+    const runB = buildPublicRun({ id: 'p-b', comparisonOrder: 5, windowStart: '2026-09-01T10:00:00.000Z', siteKey: 'site-b' });
+    const runA = buildPublicRun({ id: 'p-a', comparisonOrder: 0, windowStart: '2026-09-01T10:00:00.000Z', siteKey: 'site-a' });
+
+    const ordered = [runB, runA].sort(comparisonOrder);
+    expect(ordered.map((r) => r.id)).toEqual(['p-a', 'p-b']);
   });
 });

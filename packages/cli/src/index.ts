@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command, CommanderError, InvalidArgumentError } from 'commander';
@@ -167,9 +168,30 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   return runCli(argv);
 }
 
-/** Returns whether a module URL is the resolved path invoked by Node. */
+/** Returns the canonical (symlink-resolved) form of `path`, or the resolved-but-unresolved path if it does not exist on disk. */
+function canonicalize(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
+ * Returns whether a module URL is the resolved path invoked by Node.
+ *
+ * `pnpm link --global` (and manual `npm link`/symlink installs) installs a
+ * bin symlink, so `process.argv[1]` is the symlink path rather than the
+ * real file the module URL points to. A lexical string compare between the
+ * two therefore always misses under that workflow, silently making the CLI
+ * exit 0 with no output. Canonicalizing both sides with `realpath` before
+ * comparing fixes that while still working for the non-symlink case. A
+ * nonexistent argv path canonicalizes to itself (via the catch above) and
+ * simply fails to match, without throwing.
+ */
 export function isDirectEntryPoint(moduleUrl: string, argvPath: string | undefined): boolean {
-  return argvPath !== undefined && fileURLToPath(moduleUrl) === resolve(argvPath);
+  if (argvPath === undefined) return false;
+  return canonicalize(fileURLToPath(moduleUrl)) === canonicalize(resolve(argvPath));
 }
 
 function makeDashboardRebuild(archiveDir: string): (archive: import('@sitbench/core').Archive) => Promise<void> {
