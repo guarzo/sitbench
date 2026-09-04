@@ -2,7 +2,7 @@ import { cp, mkdir, readFile, readdir } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
-import { Archive, type RunSummary } from '@sitbench/core';
+import { Archive, LocalDashboardDatasetSchema, type RunSummary } from '@sitbench/core';
 import serveHandler from 'serve-handler';
 import { regenerateDashboardData } from './dashboard-export.js';
 import { defaultArchiveDir } from './paths.js';
@@ -63,10 +63,16 @@ async function ensureDashboardAssets(distDir: string, targetDir: string): Promis
 
 /**
  * Returns whether `<archive>/dashboard/data/runs.json` is missing or stale
- * relative to the archive's current run summaries: missing/unreadable/
- * malformed data is stale, a differing run count is stale, and a most-recent
- * `updatedAt` newer than the dataset's `generatedAt` is stale (a run was
- * edited or recalculated after the dataset was last written).
+ * relative to the archive's current run summaries. The existing file must
+ * fully satisfy `LocalDashboardDatasetSchema` (mode, capabilities, and every
+ * nested run field) to be trusted at all -- a malformed file, a public
+ * dataset sitting at the local path, or any other schema violation is
+ * always stale regardless of run count or timestamps. Given a valid
+ * dataset, a differing run count is stale, and comparing the *parsed*
+ * instants (`Date.parse`) of the most recent archived `updatedAt` against
+ * the dataset's `generatedAt` is stale when the former is later -- never a
+ * raw string/lexical comparison, which does not order ISO timestamps with
+ * differing UTC offsets correctly.
  */
 async function isDashboardDataStale(dataPath: string, runs: RunSummary[]): Promise<boolean> {
   let raw: string;
@@ -82,18 +88,19 @@ async function isDashboardDataStale(dataPath: string, runs: RunSummary[]): Promi
   } catch {
     return true;
   }
-  if (typeof parsed !== 'object' || parsed === null) {
+
+  const result = LocalDashboardDatasetSchema.safeParse(parsed);
+  if (!result.success) {
     return true;
   }
-  const dataset = parsed as { runs?: unknown[]; generatedAt?: unknown };
-  if (!Array.isArray(dataset.runs) || dataset.runs.length !== runs.length) {
+  const dataset = result.data;
+  if (dataset.runs.length !== runs.length) {
     return true;
   }
-  if (typeof dataset.generatedAt !== 'string') {
-    return true;
-  }
-  const mostRecentUpdate = runs.reduce((max, run) => (run.updatedAt > max ? run.updatedAt : max), '');
-  return mostRecentUpdate > dataset.generatedAt;
+
+  const mostRecentUpdateMs = runs.reduce((max, run) => Math.max(max, Date.parse(run.updatedAt)), 0);
+  const generatedAtMs = Date.parse(dataset.generatedAt);
+  return mostRecentUpdateMs > generatedAtMs;
 }
 
 async function regenerateIfStaleOrMissing(archive: Archive, archiveDir: string, dashboardDir: string): Promise<void> {
@@ -105,12 +112,73 @@ async function regenerateIfStaleOrMissing(archive: Archive, archiveDir: string, 
 }
 
 /**
- * Starts a static file server bound to `127.0.0.1` only — there is no way
+ * The exact requests this server will ever serve: `/` and `/index.html`
+ * (the packaged dashboard shell), `/data/runs.json` (the generated local
+ * dataset), and a plain filename directly under `/assets/` (no
+ * subdirectories, no path traversal -- the pattern's character class never
+ * includes `/`, so a decoded `..`/`/` sequence can never match it). Every
+ * other request -- including a planted `events.jsonl`, an archived `runs/`
+ * tree, an arbitrary file, or any directory listing -- is refused with 404
+ * before `serve-handler` is ever consulted, regardless of whether the path
+ * actually exists on disk.
+ */
+const ASSET_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+type AllowedDashboardRequest = { kind: 'shell' } | { kind: 'data' } | { kind: 'asset'; name: string };
+
+function classifyDashboardRequest(rawUrl: string | undefined): AllowedDashboardRequest | null {
+  if (rawUrl === undefined) {
+    return null;
+  }
+  let pathname: string;
+  try {
+    // The WHATWG URL parser collapses raw ".." path segments during
+    // construction; percent-encoded segments (e.g. "%2e%2e") are decoded
+    // afterward and re-validated against the strict per-category patterns
+    // below, so no encoding trick can smuggle a "/" or ".." through.
+    pathname = decodeURIComponent(new URL(rawUrl, 'http://127.0.0.1').pathname);
+  } catch {
+    return null;
+  }
+
+  if (pathname === '/' || pathname === '/index.html' || pathname === '/index') {
+    // serve-handler's default cleanUrls behavior 301-redirects an explicit
+    // "/index.html" request to "/index" and then resolves that back to the
+    // same file internally; both hops must stay inside the allowlist.
+    return { kind: 'shell' };
+  }
+  if (pathname === '/data/runs.json') {
+    return { kind: 'data' };
+  }
+  if (pathname.startsWith('/assets/')) {
+    const name = pathname.slice('/assets/'.length);
+    if (ASSET_NAME_PATTERN.test(name)) {
+      return { kind: 'asset', name };
+    }
+  }
+  return null;
+}
+
+/**
+ * Starts a static file server bound to `127.0.0.1` only -- there is no way
  * to pass a different bind address. `port` defaults to `0` (ephemeral).
+ * Requests are pre-validated against an exact allowlist (see
+ * `classifyDashboardRequest`) before `serve-handler` ever sees them, and
+ * directory listing is disabled as further defense in depth.
  */
 export async function startDashboardServer(rootDir: string, port = 0): Promise<RunningDashboardServer> {
   const server: Server = createServer((request, response) => {
-    void serveHandler(request, response, { public: rootDir });
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      response.statusCode = 405;
+      response.end();
+      return;
+    }
+    if (classifyDashboardRequest(request.url) === null) {
+      response.statusCode = 404;
+      response.end('Not Found');
+      return;
+    }
+    void serveHandler(request, response, { public: rootDir, directoryListing: false });
   });
 
   await new Promise<void>((resolve, reject) => {

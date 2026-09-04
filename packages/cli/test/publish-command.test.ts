@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -183,7 +183,7 @@ describe('runPublish', () => {
     expect(html).toContain('sitbench dashboard');
   });
 
-  it('writes the dataset atomically (no partial file left on a mid-write failure)', async () => {
+  it('overwrites an existing runs.json atomically when the write succeeds', async () => {
     const archive = new Archive(archiveDir);
     await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
     const outDir = path.join(root, 'out-atomic');
@@ -199,6 +199,31 @@ describe('runPublish', () => {
     // No leftover temp files from the atomic write.
     const dataDirEntries = await readdir(path.join(outDir, 'data'));
     expect(dataDirEntries.every((name) => !name.startsWith('.tmp-'))).toBe(true);
+  });
+
+  it('returns fatal and preserves the prior runs.json unchanged, with no temp artifacts, when the injected dataset writer fails', async () => {
+    const archive = new Archive(archiveDir);
+    await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+    const outDir = path.join(root, 'out-atomic-failure');
+    await mkdir(path.join(outDir, 'data'), { recursive: true });
+    await writeFile(path.join(outDir, 'data', 'runs.json'), 'previous-content', 'utf8');
+
+    const result = await runPublish(
+      { out: outDir, archive: archiveDir },
+      {
+        distDir: fakeDistDir,
+        write: () => undefined,
+        writeDataset: async () => {
+          throw new Error('simulated disk failure');
+        },
+      },
+    );
+
+    expect(result.status).toBe('fatal');
+    const preserved = await readFile(path.join(outDir, 'data', 'runs.json'), 'utf8');
+    expect(preserved).toBe('previous-content');
+    const dataDirEntries = await readdir(path.join(outDir, 'data'));
+    expect(dataDirEntries).toEqual(['runs.json']);
   });
 
   it('does not initialize Git in the output directory', async () => {
@@ -226,5 +251,175 @@ describe('runPublish', () => {
     );
 
     expect(result.status).toBe('fatal');
+  });
+
+  describe('privacy boundary between --out and the archive', () => {
+    it('rejects publishing when --out is the exact same directory as the archive', async () => {
+      const archive = new Archive(archiveDir);
+      await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+
+      const result = await runPublish(
+        { out: archiveDir, archive: archiveDir },
+        { distDir: fakeDistDir, write: () => undefined },
+      );
+
+      expect(result.status).toBe('fatal');
+      expect(await readFile(path.join(archiveDir, 'runs', 'run-a', 'run.json'), 'utf8')).toContain('run-a');
+      const archiveEntries = await readdir(archiveDir);
+      expect(archiveEntries).not.toContain('index.html');
+    });
+
+    it('rejects publishing when --out is an ancestor directory of the archive', async () => {
+      const nestedArchiveDir = path.join(root, 'nested', 'archive');
+      await mkdir(nestedArchiveDir, { recursive: true });
+      const nestedArchive = new Archive(nestedArchiveDir);
+      await nestedArchive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+
+      const result = await runPublish(
+        { out: path.join(root, 'nested'), archive: nestedArchiveDir },
+        { distDir: fakeDistDir, write: () => undefined },
+      );
+
+      expect(result.status).toBe('fatal');
+      const nestedEntries = await readdir(path.join(root, 'nested'));
+      expect(nestedEntries).toEqual(['archive']);
+    });
+
+    it('rejects publishing when --out is a descendant directory of the archive', async () => {
+      const archive = new Archive(archiveDir);
+      await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+      const nestedOutDir = path.join(archiveDir, 'public');
+
+      const result = await runPublish(
+        { out: nestedOutDir, archive: archiveDir },
+        { distDir: fakeDistDir, write: () => undefined },
+      );
+
+      expect(result.status).toBe('fatal');
+      const archiveEntries = await readdir(archiveDir);
+      expect(archiveEntries).not.toContain('public');
+    });
+
+    it('rejects publishing when --out is a symlink whose target resolves into the archive directory', async () => {
+      const archive = new Archive(archiveDir);
+      await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+      const symlinkOutDir = path.join(root, 'out-symlink-into-archive');
+      await symlink(archiveDir, symlinkOutDir, 'dir');
+
+      const result = await runPublish(
+        { out: symlinkOutDir, archive: archiveDir },
+        { distDir: fakeDistDir, write: () => undefined },
+      );
+
+      expect(result.status).toBe('fatal');
+      const archiveEntries = await readdir(archiveDir);
+      expect(archiveEntries).not.toContain('index.html');
+    });
+
+    it('rejects publishing when --out is a symlink to an unrelated directory (root symlinks are always refused)', async () => {
+      const archive = new Archive(archiveDir);
+      await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+      const elsewhere = path.join(root, 'elsewhere');
+      await mkdir(elsewhere, { recursive: true });
+      const symlinkOutDir = path.join(root, 'out-symlink-elsewhere');
+      await symlink(elsewhere, symlinkOutDir, 'dir');
+
+      const result = await runPublish(
+        { out: symlinkOutDir, archive: archiveDir },
+        { distDir: fakeDistDir, write: () => undefined },
+      );
+
+      expect(result.status).toBe('fatal');
+      const elsewhereEntries = await readdir(elsewhere);
+      expect(elsewhereEntries).toEqual([]);
+    });
+
+    it('rejects publishing when an existing "data" entry inside --out is a symlink', async () => {
+      const archive = new Archive(archiveDir);
+      await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+      const outDir = path.join(root, 'out-data-symlink');
+      await mkdir(outDir, { recursive: true });
+      const elsewhere = path.join(root, 'elsewhere-data');
+      await mkdir(elsewhere, { recursive: true });
+      await symlink(elsewhere, path.join(outDir, 'data'), 'dir');
+
+      const result = await runPublish(
+        { out: outDir, archive: archiveDir },
+        { distDir: fakeDistDir, write: () => undefined },
+      );
+
+      expect(result.status).toBe('fatal');
+      const elsewhereEntries = await readdir(elsewhere);
+      expect(elsewhereEntries).toEqual([]);
+    });
+
+    it('rejects publishing when an existing "assets" entry inside --out is a symlink', async () => {
+      const archive = new Archive(archiveDir);
+      await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+      const outDir = path.join(root, 'out-assets-symlink');
+      await mkdir(outDir, { recursive: true });
+      const elsewhere = path.join(root, 'elsewhere-assets');
+      await mkdir(elsewhere, { recursive: true });
+      await symlink(elsewhere, path.join(outDir, 'assets'), 'dir');
+
+      const result = await runPublish(
+        { out: outDir, archive: archiveDir },
+        { distDir: fakeDistDir, write: () => undefined },
+      );
+
+      expect(result.status).toBe('fatal');
+      const elsewhereEntries = await readdir(elsewhere);
+      expect(elsewhereEntries).toEqual([]);
+    });
+
+    it('rejects publishing when an existing "data/runs.json" inside --out is a symlink', async () => {
+      const archive = new Archive(archiveDir);
+      await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+      const outDir = path.join(root, 'out-runsjson-symlink');
+      await mkdir(path.join(outDir, 'data'), { recursive: true });
+      const outsideTarget = path.join(root, 'outside-runs.json');
+      await writeFile(outsideTarget, 'outside content', 'utf8');
+      await symlink(outsideTarget, path.join(outDir, 'data', 'runs.json'));
+
+      const result = await runPublish(
+        { out: outDir, archive: archiveDir },
+        { distDir: fakeDistDir, write: () => undefined },
+      );
+
+      expect(result.status).toBe('fatal');
+      expect(await readFile(outsideTarget, 'utf8')).toBe('outside content');
+    });
+
+    it('publishes successfully when --out and the archive are sibling directories under a shared parent', async () => {
+      const archive = new Archive(archiveDir);
+      await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+      const siblingOutDir = path.join(root, 'sibling-out');
+
+      const result = await runPublish(
+        { out: siblingOutDir, archive: archiveDir },
+        { distDir: fakeDistDir, write: () => undefined },
+      );
+
+      expect(result.status).toBe('published');
+      const html = await readFile(path.join(siblingOutDir, 'index.html'), 'utf8');
+      expect(html).toContain('sitbench dashboard');
+    });
+
+    it('publishes successfully when the output directory name is a prefix of the archive directory name (no naive string-prefix overlap check)', async () => {
+      const prefixArchiveDir = path.join(root, 'archive-extended');
+      await mkdir(prefixArchiveDir, { recursive: true });
+      const prefixArchive = new Archive(prefixArchiveDir);
+      await prefixArchive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+      const prefixOutDir = path.join(root, 'archive');
+
+      const result = await runPublish(
+        { out: prefixOutDir, archive: prefixArchiveDir },
+        { distDir: fakeDistDir, write: () => undefined },
+      );
+
+      expect(result.status).toBe('published');
+      const html = await readFile(path.join(prefixOutDir, 'index.html'), 'utf8');
+      expect(html).toContain('sitbench dashboard');
+    });
   });
 });

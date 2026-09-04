@@ -1,4 +1,5 @@
 import type { DashboardRun } from './data.js';
+import { comparisonOrder } from './compare.js';
 import { formatDps, formatElapsed, formatShortDate } from './format.js';
 
 // ---------------------------------------------------------------------------
@@ -30,6 +31,13 @@ function sortRuns(runs: DashboardRun[], sort: HistorySort): DashboardRun[] {
     switch (sort.field) {
       case 'date':
         cmp = a.window.start.localeCompare(b.window.start);
+        if (cmp === 0) {
+          // Payload order is never a stable chronology: break equal-date
+          // ties using the same comparison chronology the rest of the
+          // dashboard uses -- (createdAt, id) for local runs, (comparisonOrder,
+          // id) for public runs.
+          cmp = comparisonOrder(a, b);
+        }
         break;
       case 'elapsed':
         cmp = a.metrics.elapsedSeconds - b.metrics.elapsedSeconds;

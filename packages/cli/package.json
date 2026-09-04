@@ -7,8 +7,8 @@
     "sitbench": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc --project tsconfig.json",
-    "test": "vitest run",
+    "build": "pnpm --filter \"@sitbench/dashboard...\" build && tsc --project tsconfig.json",
+    "test": "pnpm --filter \"@sitbench/dashboard...\" build && vitest run",
     "vitest": "vitest",
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },

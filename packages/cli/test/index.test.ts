@@ -1,7 +1,7 @@
 import { relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { createProgram, isDirectEntryPoint, runCli } from '../src/index.js';
+import { createProgram, isDirectEntryPoint, runCli, waitForShutdownSignal } from '../src/index.js';
 
 describe('isDirectEntryPoint', () => {
   it('matches a resolved argv entry path to its module URL, but not a different path', () => {
@@ -239,5 +239,46 @@ describe('createProgram', () => {
     const help = output.join('');
     expect(help).toContain('dashboard [options]');
     expect(help).toContain('publish [options]');
+  });
+});
+
+describe('waitForShutdownSignal', () => {
+  it('closes exactly once and removes both signal listeners after either SIGINT or SIGTERM fires, without a duplicate signal triggering a second close', async () => {
+    const baselineSigint = process.listenerCount('SIGINT');
+    const baselineSigterm = process.listenerCount('SIGTERM');
+    let closeCalls = 0;
+    const close = async (): Promise<void> => {
+      closeCalls += 1;
+    };
+
+    const promise = waitForShutdownSignal(close);
+    expect(process.listenerCount('SIGINT')).toBe(baselineSigint + 1);
+    expect(process.listenerCount('SIGTERM')).toBe(baselineSigterm + 1);
+
+    process.emit('SIGINT');
+    // A duplicate/second signal immediately afterward must not close again.
+    process.emit('SIGTERM');
+    await promise;
+
+    expect(closeCalls).toBe(1);
+    expect(process.listenerCount('SIGINT')).toBe(baselineSigint);
+    expect(process.listenerCount('SIGTERM')).toBe(baselineSigterm);
+  });
+
+  it('closes exactly once when SIGTERM fires first, and removes the unfired SIGINT listener too', async () => {
+    const baselineSigint = process.listenerCount('SIGINT');
+    const baselineSigterm = process.listenerCount('SIGTERM');
+    let closeCalls = 0;
+    const close = async (): Promise<void> => {
+      closeCalls += 1;
+    };
+
+    const promise = waitForShutdownSignal(close);
+    process.emit('SIGTERM');
+    await promise;
+
+    expect(closeCalls).toBe(1);
+    expect(process.listenerCount('SIGINT')).toBe(baselineSigint);
+    expect(process.listenerCount('SIGTERM')).toBe(baselineSigterm);
   });
 });

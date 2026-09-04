@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -80,6 +80,120 @@ describe('startDashboardServer', () => {
       expect(server.address).toBe('127.0.0.1');
       expect(server.port).toBeGreaterThan(0);
       expect(server.url).toBe(`http://127.0.0.1:${String(server.port)}/`);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('serves / and /index.html', async () => {
+    const server = await startDashboardServer(fakeDistDir, 0);
+    try {
+      const rootResponse = await fetch(server.url);
+      expect(rootResponse.status).toBe(200);
+      expect(await rootResponse.text()).toContain('sitbench dashboard');
+
+      const indexResponse = await fetch(new URL('index.html', server.url));
+      expect(indexResponse.status).toBe(200);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('serves a real asset file under /assets/', async () => {
+    const server = await startDashboardServer(fakeDistDir, 0);
+    try {
+      const response = await fetch(new URL('assets/app.js', server.url));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain('console.log');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('serves /data/runs.json when it exists', async () => {
+    await mkdir(path.join(fakeDistDir, 'data'), { recursive: true });
+    await writeFile(path.join(fakeDistDir, 'data', 'runs.json'), JSON.stringify({ mode: 'local' }), 'utf8');
+    const server = await startDashboardServer(fakeDistDir, 0);
+    try {
+      const response = await fetch(new URL('data/runs.json', server.url));
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { mode: string };
+      expect(body.mode).toBe('local');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('returns 404 for a planted events.jsonl file even though it exists on disk', async () => {
+    await writeFile(path.join(fakeDistDir, 'events.jsonl'), '{"kind":"damage-dealt"}\n', 'utf8');
+    const server = await startDashboardServer(fakeDistDir, 0);
+    try {
+      const response = await fetch(new URL('events.jsonl', server.url));
+      expect(response.status).toBe(404);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('returns 404 for a planted runs/ directory and its contents even though they exist on disk', async () => {
+    await mkdir(path.join(fakeDistDir, 'runs', 'run-a'), { recursive: true });
+    await writeFile(path.join(fakeDistDir, 'runs', 'run-a', 'run.json'), '{"id":"run-a"}', 'utf8');
+    const server = await startDashboardServer(fakeDistDir, 0);
+    try {
+      const fileResponse = await fetch(new URL('runs/run-a/run.json', server.url));
+      expect(fileResponse.status).toBe(404);
+      const dirResponse = await fetch(new URL('runs/', server.url));
+      expect(dirResponse.status).toBe(404);
+      const dirNoSlashResponse = await fetch(new URL('runs', server.url));
+      expect(dirNoSlashResponse.status).toBe(404);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('returns 404 for an arbitrary planted file outside the allowlist', async () => {
+    await writeFile(path.join(fakeDistDir, 'secret.txt'), 'top secret', 'utf8');
+    const server = await startDashboardServer(fakeDistDir, 0);
+    try {
+      const response = await fetch(new URL('secret.txt', server.url));
+      expect(response.status).toBe(404);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('returns 404 for directory listing of the asset directory itself', async () => {
+    const server = await startDashboardServer(fakeDistDir, 0);
+    try {
+      const withSlash = await fetch(new URL('assets/', server.url));
+      expect(withSlash.status).toBe(404);
+      const withoutSlash = await fetch(new URL('assets', server.url));
+      expect(withoutSlash.status).toBe(404);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('returns 404 for an asset path traversal attempt, raw and percent-encoded', async () => {
+    const server = await startDashboardServer(fakeDistDir, 0);
+    try {
+      const raw = await fetch(new URL('assets/../../etc/passwd', server.url));
+      expect(raw.status).toBe(404);
+      const encoded = await fetch(`${server.url}assets/%2e%2e%2f%2e%2e%2fetc%2fpasswd`);
+      expect(encoded.status).toBe(404);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('returns 404 for a symlinked file under assets/ even though its name matches the allowlist', async () => {
+    const outsideTarget = path.join(root, 'outside-secret.txt');
+    await writeFile(outsideTarget, 'outside secret', 'utf8');
+    await symlink(outsideTarget, path.join(fakeDistDir, 'assets', 'evil.js'));
+    const server = await startDashboardServer(fakeDistDir, 0);
+    try {
+      const response = await fetch(new URL('assets/evil.js', server.url));
+      expect(response.status).toBe(404);
     } finally {
       await server.close();
     }
@@ -186,5 +300,77 @@ describe('runDashboard', () => {
       { distDir: missingDistDir, write: () => undefined },
     );
     expect(result.status).toBe('fatal');
+  });
+
+  it('regenerates when the existing dataset is well-formed but its generatedAt uses an offset that lexically outranks an actually-later update', async () => {
+    const archive = new Archive(archiveDir);
+    const run = buildSummary('run-a', '2026-09-01T10:00:00.000Z', { updatedAt: '2026-09-01T14:00:00.000Z' });
+    await archive.saveRun(run, []);
+
+    // Crafted so that a *lexical* string comparison of the raw ISO strings
+    // would say this dataset is still fresh ("23..." > "14..."), while the
+    // real UTC instant it represents (13:00Z) is actually BEFORE the run's
+    // updatedAt (14:00Z) -- i.e. genuinely stale.
+    const staleButLexicallyNewer = {
+      schemaVersion: 1,
+      mode: 'local',
+      generatedAt: '2026-09-01T23:00:00+10:00',
+      capabilities: { characters: true, notes: true },
+      runs: [run],
+    };
+    await mkdir(path.join(archiveDir, 'dashboard', 'data'), { recursive: true });
+    await writeFile(
+      path.join(archiveDir, 'dashboard', 'data', 'runs.json'),
+      JSON.stringify(staleButLexicallyNewer),
+      'utf8',
+    );
+
+    const result = await runDashboard({ archive: archiveDir, port: 0 }, { distDir: fakeDistDir, write: () => undefined });
+    expect(result.status).toBe('serving');
+    if (result.status !== 'serving') return;
+    try {
+      const raw = JSON.parse(
+        await readFile(path.join(archiveDir, 'dashboard', 'data', 'runs.json'), 'utf8'),
+      ) as { generatedAt: string };
+      expect(raw.generatedAt).not.toBe('2026-09-01T23:00:00+10:00');
+    } finally {
+      await result.close();
+    }
+  });
+
+  it('regenerates when the existing dataset has a matching run count but fails LocalDashboardDatasetSchema (e.g. mode is not "local")', async () => {
+    const archive = new Archive(archiveDir);
+    const run = buildSummary('run-a', '2026-09-01T10:00:00.000Z');
+    await archive.saveRun(run, []);
+
+    // Same run count as the real archive, and a generatedAt far in the
+    // future (so a naive timestamp-only check alone would call this fresh),
+    // but mode is "public" -- invalid at the local data path.
+    const wrongModeSameCount = {
+      schemaVersion: 1,
+      mode: 'public',
+      generatedAt: '2099-01-01T00:00:00.000Z',
+      capabilities: { characters: false, notes: false },
+      runs: [{ ...run, comparisonOrder: 0 }],
+    };
+    await mkdir(path.join(archiveDir, 'dashboard', 'data'), { recursive: true });
+    await writeFile(
+      path.join(archiveDir, 'dashboard', 'data', 'runs.json'),
+      JSON.stringify(wrongModeSameCount),
+      'utf8',
+    );
+
+    const result = await runDashboard({ archive: archiveDir, port: 0 }, { distDir: fakeDistDir, write: () => undefined });
+    expect(result.status).toBe('serving');
+    if (result.status !== 'serving') return;
+    try {
+      const raw = JSON.parse(
+        await readFile(path.join(archiveDir, 'dashboard', 'data', 'runs.json'), 'utf8'),
+      ) as { mode: string; generatedAt: string };
+      expect(raw.mode).toBe('local');
+      expect(raw.generatedAt).not.toBe('2099-01-01T00:00:00.000Z');
+    } finally {
+      await result.close();
+    }
   });
 });

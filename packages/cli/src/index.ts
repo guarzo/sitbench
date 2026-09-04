@@ -202,6 +202,29 @@ async function executeEditInteractively(arguments_: EditArguments): Promise<Edit
 }
 
 /**
+ * Resolves once SIGINT or SIGTERM arrives, closing the server exactly once
+ * and removing BOTH signal listeners regardless of which signal actually
+ * fired -- so the listener for whichever signal did not fire never leaks,
+ * and a second/duplicate signal (either the same one twice, or the other
+ * one arriving immediately after) can never trigger a second `close()`
+ * call (closing an already-closed http.Server throws).
+ */
+export function waitForShutdownSignal(close: () => Promise<void>): Promise<void> {
+  return new Promise<void>((resolvePromise) => {
+    let closing = false;
+    const shutdown = (): void => {
+      if (closing) return;
+      closing = true;
+      process.removeListener('SIGINT', shutdown);
+      process.removeListener('SIGTERM', shutdown);
+      void close().then(resolvePromise, resolvePromise);
+    };
+    process.once('SIGINT', shutdown);
+    process.once('SIGTERM', shutdown);
+  });
+}
+
+/**
  * Starts the dashboard server and — only for the real executable path, never
  * for injected test callers — keeps the process foregrounded until an
  * interrupt/terminate signal arrives, then closes the server before
@@ -213,13 +236,7 @@ async function executeDashboardInteractively(arguments_: DashboardArguments): Pr
   if (result.status !== 'serving') {
     return result;
   }
-  await new Promise<void>((resolvePromise) => {
-    const shutdown = (): void => {
-      void result.close().then(resolvePromise, resolvePromise);
-    };
-    process.once('SIGINT', shutdown);
-    process.once('SIGTERM', shutdown);
-  });
+  await waitForShutdownSignal(result.close);
   return result;
 }
 
