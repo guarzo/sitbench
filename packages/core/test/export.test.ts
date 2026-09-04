@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { buildLocalDashboardDataset, LocalDashboardDatasetSchema, PublicDashboardDatasetSchema, DashboardDatasetSchema } from '../src/export.js';
+import {
+  buildLocalDashboardDataset,
+  buildPublicDashboardDataset,
+  LocalDashboardDatasetSchema,
+  PublicDashboardDatasetSchema,
+  DashboardDatasetSchema,
+} from '../src/export.js';
 import type { RunSummary } from '../src/schemas.js';
 
 let idCounter = 0;
@@ -218,5 +224,150 @@ describe('Zod dataset schemas', () => {
     const localResult = DashboardDatasetSchema.safeParse(localData);
     expect(localResult.success).toBe(true);
     if (localResult.success) expect(localResult.data.mode).toBe('local');
+  });
+});
+
+describe('buildPublicDashboardDataset', () => {
+  it('defaults to mode "public" with both capabilities false and excludes character/notes fields', () => {
+    const run = buildRun({ windowStart: '2026-09-01T10:00:00.000Z' });
+    const dataset = buildPublicDashboardDataset([run]);
+
+    expect(dataset.mode).toBe('public');
+    expect(dataset.schemaVersion).toBe(1);
+    expect(dataset.capabilities).toEqual({ characters: false, notes: false });
+    expect(dataset.runs).toHaveLength(1);
+
+    const published = dataset.runs[0]!;
+    expect(published.id).toBe(run.id);
+    expect(published.site).toEqual(run.site);
+    expect(published.fleetProfile).toEqual(run.fleetProfile);
+    expect(published.window).toEqual(run.window);
+    expect(published.calculation).toEqual(run.calculation);
+    expect(published.metrics).toEqual(run.metrics);
+    expect(published.coverage).toEqual(run.coverage);
+    expect(published.comparisonOrder).toBe(0);
+    expect(published).not.toHaveProperty('participants');
+    expect(published).not.toHaveProperty('characterMetrics');
+    expect(published).not.toHaveProperty('notes');
+
+    const serializedRuns = JSON.stringify(dataset.runs);
+    expect(serializedRuns).not.toContain('"participants"');
+    expect(serializedRuns).not.toContain('"characterMetrics"');
+    expect(serializedRuns).not.toContain('"notes"');
+  });
+
+  it('includeCharacters restores participants and characterMetrics and sets only the characters capability', () => {
+    const run = buildRun({ windowStart: '2026-09-01T10:00:00.000Z' });
+    const dataset = buildPublicDashboardDataset([run], { includeCharacters: true });
+
+    expect(dataset.capabilities).toEqual({ characters: true, notes: false });
+    const published = dataset.runs[0]!;
+    expect(published.participants).toEqual(run.participants);
+    expect(published.characterMetrics).toEqual(run.characterMetrics);
+    expect(published).not.toHaveProperty('notes');
+  });
+
+  it('includeNotes restores notes (including null) and sets only the notes capability', () => {
+    const run = buildRun({ windowStart: '2026-09-01T10:00:00.000Z' });
+    const dataset = buildPublicDashboardDataset([run], { includeNotes: true });
+
+    expect(dataset.capabilities).toEqual({ characters: false, notes: true });
+    const published = dataset.runs[0]!;
+    expect(published.notes).toBe(run.notes);
+    expect(published).not.toHaveProperty('participants');
+    expect(published).not.toHaveProperty('characterMetrics');
+
+    const runWithNullNotes = buildRun({ windowStart: '2026-09-02T10:00:00.000Z', notes: null });
+    const withNull = buildPublicDashboardDataset([runWithNullNotes], { includeNotes: true });
+    expect(withNull.runs[0]!.notes).toBeNull();
+  });
+
+  it('enabling both restores both groups and sets both capability flags', () => {
+    const run = buildRun({ windowStart: '2026-09-01T10:00:00.000Z' });
+    const dataset = buildPublicDashboardDataset([run], { includeCharacters: true, includeNotes: true });
+
+    expect(dataset.capabilities).toEqual({ characters: true, notes: true });
+    const published = dataset.runs[0]!;
+    expect(published.participants).toEqual(run.participants);
+    expect(published.characterMetrics).toEqual(run.characterMetrics);
+    expect(published.notes).toBe(run.notes);
+  });
+
+  it.each([
+    [{}],
+    [{ includeCharacters: true }],
+    [{ includeNotes: true }],
+    [{ includeCharacters: true, includeNotes: true }],
+  ])('excludes raw events, local paths, fingerprint, and creation/update metadata for options %#', (options) => {
+    const run = buildRun({ windowStart: '2026-09-01T10:00:00.000Z' });
+    const dataset = buildPublicDashboardDataset([run], options);
+    const serialized = JSON.stringify(dataset);
+
+    expect(serialized).not.toContain('"fingerprint"');
+    expect(serialized).not.toContain('"createdAt"');
+    expect(serialized).not.toContain('"updatedAt"');
+    expect(serialized).not.toContain('"sourceFile"');
+    expect(serialized).not.toContain('"sourceLine"');
+    expect(serialized).not.toContain('"raw"');
+    expect(serialized).not.toContain('"observedBy"');
+
+    const validation = PublicDashboardDatasetSchema.safeParse(dataset);
+    expect(validation.success).toBe(true);
+  });
+
+  it('assigns comparisonOrder within each exact (site.key, fleetProfile.id) group by (createdAt, id) chronology, independent of payload order', () => {
+    const siteA = { name: 'Site A', key: 'site-a' };
+    const siteB = { name: 'Site B', key: 'site-b' };
+    const profile = { id: '8-kikis-2-deacons', name: '8 Kikis + 2 Deacons' };
+
+    // Payload order deliberately scrambled and inverted relative to createdAt.
+    const aOldest = buildRun({ windowStart: '2026-09-03T10:00:00.000Z', site: siteA, fleetProfile: profile, id: 'a-oldest', createdAt: '2026-09-01T00:00:00.000Z' });
+    const aMiddle = buildRun({ windowStart: '2026-09-01T10:00:00.000Z', site: siteA, fleetProfile: profile, id: 'a-middle', createdAt: '2026-09-02T00:00:00.000Z' });
+    const aNewest = buildRun({ windowStart: '2026-09-02T10:00:00.000Z', site: siteA, fleetProfile: profile, id: 'a-newest', createdAt: '2026-09-03T00:00:00.000Z' });
+    const bOnly = buildRun({ windowStart: '2026-09-01T09:00:00.000Z', site: siteB, fleetProfile: profile, id: 'b-only', createdAt: '2026-09-01T00:00:00.000Z' });
+
+    const dataset = buildPublicDashboardDataset([aNewest, bOnly, aOldest, aMiddle]);
+    const byId = new Map(dataset.runs.map((run) => [run.id, run.comparisonOrder]));
+
+    // Group A ordered by createdAt regardless of payload order.
+    expect(byId.get('a-oldest')).toBe(0);
+    expect(byId.get('a-middle')).toBe(1);
+    expect(byId.get('a-newest')).toBe(2);
+    // Group B is independent and also starts at 0.
+    expect(byId.get('b-only')).toBe(0);
+  });
+
+  it('breaks equal createdAt ties within a group by run id', () => {
+    const site = { name: 'Site', key: 'site' };
+    const profile = { id: 'profile', name: 'Profile' };
+    const runB = buildRun({ windowStart: '2026-09-01T10:00:00.000Z', site, fleetProfile: profile, id: 'run-b', createdAt: '2026-09-01T00:00:00.000Z' });
+    const runA = buildRun({ windowStart: '2026-09-01T11:00:00.000Z', site, fleetProfile: profile, id: 'run-a', createdAt: '2026-09-01T00:00:00.000Z' });
+
+    const dataset = buildPublicDashboardDataset([runB, runA]);
+    const byId = new Map(dataset.runs.map((run) => [run.id, run.comparisonOrder]));
+
+    expect(byId.get('run-a')).toBe(0);
+    expect(byId.get('run-b')).toBe(1);
+  });
+
+  it('sorts the overall runs array ascending by window.start with an id tiebreak, matching the local builder', () => {
+    const later = buildRun({ windowStart: '2026-09-02T10:00:00.000Z' });
+    const earlier = buildRun({ windowStart: '2026-09-01T10:00:00.000Z' });
+    const dataset = buildPublicDashboardDataset([later, earlier]);
+
+    expect(dataset.runs[0]!.id).toBe(earlier.id);
+    expect(dataset.runs[1]!.id).toBe(later.id);
+  });
+
+  it('returns an empty runs array when given no runs', () => {
+    const dataset = buildPublicDashboardDataset([]);
+    expect(dataset.runs).toEqual([]);
+    expect(dataset.mode).toBe('public');
+  });
+
+  it('uses the injected generatedAt when provided', () => {
+    const run = buildRun({ windowStart: '2026-09-01T10:00:00.000Z' });
+    const dataset = buildPublicDashboardDataset([run], { generatedAt: '2026-09-05T00:00:00.000Z' });
+    expect(dataset.generatedAt).toBe('2026-09-05T00:00:00.000Z');
   });
 });

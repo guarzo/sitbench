@@ -652,7 +652,10 @@ header .subtitle {
   .sort-btn {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     min-height: 44px;
+    min-width: 44px;
+    padding: 0 var(--space-sm);
   }
 
   .history-row td {

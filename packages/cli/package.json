@@ -15,10 +15,13 @@
   "dependencies": {
     "@inquirer/prompts": "7.10.1",
     "@sitbench/core": "workspace:*",
-    "commander": "14.0.3"
+    "@sitbench/dashboard": "workspace:*",
+    "commander": "14.0.3",
+    "serve-handler": "6.1.7"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
+    "@types/serve-handler": "6.1.4",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   }

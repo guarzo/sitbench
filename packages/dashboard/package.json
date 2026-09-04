@@ -3,9 +3,24 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "files": [
+    "dist",
+    "dist-lib"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    "./data": {
+      "import": "./dist-lib/data.js",
+      "types": "./dist-lib/data.d.ts"
+    },
+    "./state": {
+      "import": "./dist-lib/state.js",
+      "types": "./dist-lib/state.d.ts"
+    }
+  },
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && tsc --project tsconfig.lib.json",
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc --project tsconfig.check.json --noEmit"

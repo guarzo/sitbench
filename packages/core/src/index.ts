@@ -9,9 +9,10 @@ export {
   writeFileAtomic,
 } from './archive.js';
 export * from './canonicalize.js';
-export { buildLocalDashboardDataset, DashboardCapabilitiesSchema, DashboardDatasetSchema, LocalDashboardDatasetSchema, PublicDashboardDatasetSchema } from './export.js';
+export { buildLocalDashboardDataset, buildPublicDashboardDataset, DashboardCapabilitiesSchema, DashboardDatasetSchema, LocalDashboardDatasetSchema, PublicDashboardDatasetSchema } from './export.js';
 export type {
   BuildLocalDatasetOptions,
+  BuildPublicDatasetOptions,
   DashboardCapabilities,
   DashboardDataset,
   LocalDashboardDataset,

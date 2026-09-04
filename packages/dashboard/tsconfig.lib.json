@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist-lib",
+    "lib": ["ES2022"]
+  },
+  "include": ["src/data.ts", "src/state.ts", "src/compare.ts"],
+  "exclude": ["node_modules", "dist", "dist-lib"]
+}

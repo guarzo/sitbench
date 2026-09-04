@@ -188,3 +188,136 @@ export function buildLocalDashboardDataset(
     runs: sorted,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Public builder
+// ---------------------------------------------------------------------------
+
+export interface BuildPublicDatasetOptions {
+  /** Restore participant identities and per-character metrics. Default false. */
+  includeCharacters?: boolean;
+  /** Restore run notes. Default false. */
+  includeNotes?: boolean;
+  /** Override the generatedAt timestamp (defaults to current time). */
+  generatedAt?: string;
+}
+
+/** Chronological order key matching core's recorded-time comparator: `(createdAt, id)`. */
+function recordedChronoCompare(a: RunSummary, b: RunSummary): number {
+  return a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
+}
+
+/**
+ * Assigns an opaque nonnegative `comparisonOrder` integer to every run,
+ * scoped to its exact `(site.key, fleetProfile.id)` group and ordered by
+ * the same recorded chronology `(createdAt, id)` that core's
+ * `compareMatchingRuns` uses. This lets the public dataset preserve
+ * comparison ordering without ever exporting `createdAt`/`updatedAt`.
+ */
+function assignComparisonOrder(runs: RunSummary[]): Map<string, number> {
+  const groups = new Map<string, RunSummary[]>();
+  for (const run of runs) {
+    const key = `${run.site.key}\u0000${run.fleetProfile.id}`;
+    const group = groups.get(key);
+    if (group) {
+      group.push(run);
+    } else {
+      groups.set(key, [run]);
+    }
+  }
+
+  const comparisonOrderById = new Map<string, number>();
+  for (const group of groups.values()) {
+    const sortedGroup = group.slice().sort(recordedChronoCompare);
+    sortedGroup.forEach((run, index) => {
+      comparisonOrderById.set(run.id, index);
+    });
+  }
+  return comparisonOrderById;
+}
+
+/**
+ * Constructs a single `PublicRunSummary` field-by-field from a validated
+ * `RunSummary`, never by deleting keys from the local record. The record is
+ * then validated through the capability-matching strict Zod schema so an
+ * accidental extra or missing field fails loudly rather than leaking.
+ */
+function toPublicRun(
+  run: RunSummary,
+  comparisonOrder: number,
+  options: { includeCharacters: boolean; includeNotes: boolean },
+): PublicRunSummary {
+  const base = {
+    id: run.id,
+    comparisonOrder,
+    site: run.site,
+    fleetProfile: run.fleetProfile,
+    window: run.window,
+    calculation: run.calculation,
+    metrics: run.metrics,
+    coverage: run.coverage,
+  };
+
+  if (options.includeCharacters && options.includeNotes) {
+    return PublicRunWithBothSchema.parse({
+      ...base,
+      participants: run.participants,
+      characterMetrics: run.characterMetrics,
+      notes: run.notes,
+    }) as PublicRunSummary;
+  }
+  if (options.includeCharacters) {
+    return PublicRunWithCharactersSchema.parse({
+      ...base,
+      participants: run.participants,
+      characterMetrics: run.characterMetrics,
+    }) as PublicRunSummary;
+  }
+  if (options.includeNotes) {
+    return PublicRunWithNotesSchema.parse({
+      ...base,
+      notes: run.notes,
+    }) as PublicRunSummary;
+  }
+  return PublicRunSummaryBaseSchema.parse(base) as PublicRunSummary;
+}
+
+/**
+ * Builds a privacy-controlled public dashboard dataset from validated run
+ * summaries. Identities (`participants`, `characterMetrics`) and `notes`
+ * are omitted by default; each is independently restored only when its
+ * matching option is `true`, and `capabilities` always reflects the
+ * resolved options exactly. `comparisonOrder` is assigned per exact
+ * `(site.key, fleetProfile.id)` group by recorded chronology `(createdAt,
+ * id)`, then the overall `runs` array is sorted ascending by `window.start`
+ * (with an `id` tiebreak), matching `buildLocalDashboardDataset`. Raw
+ * events, local file paths, fingerprints, and creation/update metadata are
+ * never included because every field is set explicitly rather than copied
+ * wholesale from the local summary.
+ */
+export function buildPublicDashboardDataset(
+  runs: RunSummary[],
+  options?: BuildPublicDatasetOptions,
+): PublicDashboardDataset {
+  const includeCharacters = options?.includeCharacters ?? false;
+  const includeNotes = options?.includeNotes ?? false;
+
+  const comparisonOrderById = assignComparisonOrder(runs);
+  const publicRuns = runs.map((run) =>
+    toPublicRun(run, comparisonOrderById.get(run.id) ?? 0, { includeCharacters, includeNotes }),
+  );
+
+  const sorted = publicRuns.slice().sort((a, b) => {
+    const cmp = a.window.start.localeCompare(b.window.start);
+    if (cmp !== 0) return cmp;
+    return a.id.localeCompare(b.id);
+  });
+
+  return {
+    schemaVersion: 1,
+    mode: 'public',
+    generatedAt: options?.generatedAt ?? new Date().toISOString(),
+    capabilities: { characters: includeCharacters, notes: includeNotes },
+    runs: sorted,
+  };
+}

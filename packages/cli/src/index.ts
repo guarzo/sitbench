@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Command, CommanderError } from 'commander';
+import { Command, CommanderError, InvalidArgumentError } from 'commander';
 import { runAnalyze, type AnalyzeArguments, type AnalyzeResult } from './analyze-command.js';
+import { runDashboard, type DashboardArguments, type DashboardResult } from './dashboard-command.js';
 import { regenerateDashboardData } from './dashboard-export.js';
 import { runEdit, type EditArguments, type EditResult } from './edit-command.js';
 import { defaultArchiveDir } from './paths.js';
+import { runPublish, type PublishArguments, type PublishResult } from './publish-command.js';
 import { runRecalculate, type RecalculateArguments, type RecalculateResult } from './recalculate-command.js';
 import { createConsolePrompts, createEditPrompts } from './ui.js';
 
@@ -13,6 +15,17 @@ export interface ProgramDependencies {
   execute?: (arguments_: AnalyzeArguments) => Promise<AnalyzeResult>;
   executeRecalculate?: (arguments_: RecalculateArguments) => Promise<RecalculateResult>;
   executeEdit?: (arguments_: EditArguments) => Promise<EditResult>;
+  executeDashboard?: (arguments_: DashboardArguments) => Promise<DashboardResult>;
+  executePublish?: (arguments_: PublishArguments) => Promise<PublishResult>;
+}
+
+/** Commander option-value parser: a non-negative integer port, or throws. */
+function parsePort(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) {
+    throw new InvalidArgumentError('--port must be an integer between 0 and 65535.');
+  }
+  return parsed;
 }
 
 /** Builds the process-independent Commander program for the sitbench executable. */
@@ -20,6 +33,8 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
   const execute = dependencies.execute ?? executeInteractively;
   const executeRecalculate = dependencies.executeRecalculate ?? executeRecalculateInteractively;
   const executeEdit = dependencies.executeEdit ?? executeEditInteractively;
+  const executeDashboard = dependencies.executeDashboard ?? executeDashboardInteractively;
+  const executePublish = dependencies.executePublish ?? executePublishInteractively;
   const program = new Command()
     .name('sitbench')
     .description('Analyze EVE Online game logs into sitbench runs.')
@@ -63,6 +78,34 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
       });
     });
 
+  program
+    .command('dashboard')
+    .description('serve the local sitbench dashboard on 127.0.0.1 (loopback only; no host/bind override)')
+    .option('--port <number>', 'port to listen on (0 = ephemeral)', parsePort)
+    .option('--archive <path>', 'sitbench archive directory')
+    .action(async (options: { port?: number; archive?: string }) => {
+      await executeDashboard({
+        ...(options.port !== undefined ? { port: options.port } : {}),
+        ...(options.archive !== undefined ? { archive: options.archive } : {}),
+      });
+    });
+
+  program
+    .command('publish')
+    .description('export a privacy-controlled static dashboard for hosting elsewhere')
+    .requiredOption('--out <directory>', 'output directory for the published dashboard')
+    .option('--include-characters', 'include participant identities and per-character metrics')
+    .option('--include-notes', 'include run notes')
+    .option('--archive <path>', 'sitbench archive directory')
+    .action(async (options: { out: string; includeCharacters?: boolean; includeNotes?: boolean; archive?: string }) => {
+      await executePublish({
+        out: options.out,
+        ...(options.includeCharacters !== undefined ? { includeCharacters: options.includeCharacters } : {}),
+        ...(options.includeNotes !== undefined ? { includeNotes: options.includeNotes } : {}),
+        ...(options.archive !== undefined ? { archive: options.archive } : {}),
+      });
+    });
+
   return program;
 }
 
@@ -71,9 +114,13 @@ export async function runCli(argv: string[], dependencies: ProgramDependencies =
   let analysisResult: AnalyzeResult | undefined;
   let recalculateResult: RecalculateResult | undefined;
   let editResult: EditResult | undefined;
+  let dashboardResult: DashboardResult | undefined;
+  let publishResult: PublishResult | undefined;
   const execute = dependencies.execute ?? executeInteractively;
   const executeRecalculate = dependencies.executeRecalculate ?? executeRecalculateInteractively;
   const executeEdit = dependencies.executeEdit ?? executeEditInteractively;
+  const executeDashboard = dependencies.executeDashboard ?? executeDashboardInteractively;
+  const executePublish = dependencies.executePublish ?? executePublishInteractively;
   const program = createProgram({
     execute: async (arguments_) => {
       analysisResult = await execute(arguments_);
@@ -87,6 +134,14 @@ export async function runCli(argv: string[], dependencies: ProgramDependencies =
       editResult = await executeEdit(arguments_);
       return editResult;
     },
+    executeDashboard: async (arguments_) => {
+      dashboardResult = await executeDashboard(arguments_);
+      return dashboardResult;
+    },
+    executePublish: async (arguments_) => {
+      publishResult = await executePublish(arguments_);
+      return publishResult;
+    },
   });
 
   try {
@@ -95,7 +150,9 @@ export async function runCli(argv: string[], dependencies: ProgramDependencies =
       analysisResult?.status === 'fatal' ||
       recalculateResult?.status === 'fatal' ||
       recalculateResult?.status === 'partial' ||
-      editResult?.status === 'fatal';
+      editResult?.status === 'fatal' ||
+      dashboardResult?.status === 'fatal' ||
+      publishResult?.status === 'fatal';
     return isFatal ? 1 : 0;
   } catch (error) {
     if (error instanceof CommanderError) {
@@ -142,6 +199,32 @@ async function executeEditInteractively(arguments_: EditArguments): Promise<Edit
     prompts: createEditPrompts(),
     rebuildCatalog: makeDashboardRebuild(archiveDir),
   });
+}
+
+/**
+ * Starts the dashboard server and — only for the real executable path, never
+ * for injected test callers — keeps the process foregrounded until an
+ * interrupt/terminate signal arrives, then closes the server before
+ * resolving. Signal handlers are registered only inside this function body
+ * when it actually runs, never at module import time.
+ */
+async function executeDashboardInteractively(arguments_: DashboardArguments): Promise<DashboardResult> {
+  const result = await runDashboard(arguments_);
+  if (result.status !== 'serving') {
+    return result;
+  }
+  await new Promise<void>((resolvePromise) => {
+    const shutdown = (): void => {
+      void result.close().then(resolvePromise, resolvePromise);
+    };
+    process.once('SIGINT', shutdown);
+    process.once('SIGTERM', shutdown);
+  });
+  return result;
+}
+
+async function executePublishInteractively(arguments_: PublishArguments): Promise<PublishResult> {
+  return runPublish(arguments_);
 }
 
 if (isDirectEntryPoint(import.meta.url, process.argv[1])) {
