@@ -1,6 +1,16 @@
+export {
+  Archive,
+  ArchiveLockedError,
+  CatalogRebuildError,
+  DuplicateRunError,
+  RunNotFoundError,
+} from './archive.js';
 export * from './canonicalize.js';
+export { compareMatchingRuns } from './comparisons.js';
+export type { RunComparison } from './comparisons.js';
 export { detectEpisodes } from './episodes.js';
 export type { CandidateEpisode, DetectEpisodesOptions } from './episodes.js';
+export { fingerprintRun } from './fingerprint.js';
 export { parseLogHeader } from './log-header.js';
 export { calculateRun } from './metrics.js';
 export type { CalculatedRun } from './metrics.js';
