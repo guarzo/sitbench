@@ -26,6 +26,19 @@ export class ArchiveLockedError extends Error {}
 export class InvalidRunIdError extends Error {}
 
 /**
+ * Thrown when a run directory's own `run.json` reports an `id` that does
+ * not match the name of the directory it is stored in. This is a distinct
+ * form of corruption from a schema-validation failure: the JSON may be
+ * perfectly well-formed (and even fully satisfy `RunSummarySchema`), but
+ * its claimed identity is inconsistent with where it physically lives in
+ * the archive. Duplicate-fingerprint enforcement fails closed on this
+ * inconsistency — it must never silently trust a directory's claimed
+ * logical id over its actual location, since that could let one archived
+ * run impersonate another's id before an authoritative save/update.
+ */
+export class ArchiveCorruptionError extends Error {}
+
+/**
  * Thrown when the authoritative run write succeeds but the derived
  * `catalog.json` rebuild that follows it fails. The durable run remains on
  * disk; callers should surface this error and may retry `rebuildCatalog()`
@@ -415,6 +428,18 @@ export class Archive {
    * authoritative mutation. Used by both `saveRun` (which excludes no id)
    * and `updateRun` (which excludes the run being updated), so both
    * enforce duplicates identically.
+   *
+   * Every entry's parsed `id` is additionally required to equal its own
+   * containing directory's name, thrown as `ArchiveCorruptionError`
+   * otherwise — this check runs for *every* directory, including the one
+   * matching `excludeId`, before that directory is (only then) omitted
+   * from the returned index. `excludeId` is therefore never a shortcut
+   * that skips validating a directory purely because its name happens to
+   * match; it only ever affects which *already-validated* entry is left
+   * out of the result. Without this, a sibling directory whose summary
+   * claims a different (possibly colliding) logical id than its actual
+   * location would be silently trusted at face value, letting one
+   * archived run impersonate another's id in the duplicate index.
    */
   private async readFingerprintIndex(excludeId?: string): Promise<Array<{ id: string; fingerprint: string }>> {
     const runsDir = this.runsDir();
@@ -425,7 +450,7 @@ export class Archive {
     const entries = await readdir(runsDir, { withFileTypes: true });
     const index: Array<{ id: string; fingerprint: string }> = [];
     for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name.startsWith(TMP_PREFIX) || entry.name === excludeId) {
+      if (!entry.isDirectory() || entry.name.startsWith(TMP_PREFIX)) {
         continue;
       }
       const runJsonPath = path.join(runsDir, entry.name, 'run.json');
@@ -434,6 +459,15 @@ export class Archive {
       }
       const raw = await readFile(runJsonPath, 'utf8');
       const parsed = this.fingerprintIndexEntrySchema.parse(JSON.parse(raw));
+      if (parsed.id !== entry.name) {
+        throw new ArchiveCorruptionError(
+          `Run directory "${entry.name}" contains a summary whose id ("${parsed.id}") does not match its ` +
+            'directory name. Refusing to trust its fingerprint before an authoritative save/update.',
+        );
+      }
+      if (entry.name === excludeId) {
+        continue;
+      }
       index.push({ id: parsed.id, fingerprint: parsed.fingerprint });
     }
     return index;

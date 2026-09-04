@@ -247,6 +247,28 @@ describe('Archive.saveRun', () => {
     const runDirExists = await readdir(path.join(archiveDir, 'runs')).then((entries) => entries.includes('new-run'));
     expect(runDirExists).toBe(false);
   });
+
+  it('fails closed on save when a sibling directory\'s summary id does not match its own directory name', async () => {
+    await mkdir(archiveDir, { recursive: true });
+    // A directory named "dir-a" whose run.json claims a completely
+    // different id ("dir-b"). Duplicate-fingerprint enforcement must never
+    // trust this claimed logical id over the directory it actually lives
+    // in — an inconsistent directory/id pairing is itself corruption,
+    // independent of whether its fingerprint happens to collide with
+    // anything.
+    const mismatchedDir = path.join(archiveDir, 'runs', 'dir-a');
+    await mkdir(mismatchedDir, { recursive: true });
+    const mismatchedSummary = buildSummary({ id: 'dir-b', fingerprint: 'unrelated-fingerprint' });
+    await writeFile(path.join(mismatchedDir, 'run.json'), `${JSON.stringify(mismatchedSummary, null, 2)}\n`, 'utf8');
+
+    const archive = new Archive(archiveDir);
+    const candidate = buildSummary({ id: 'new-run', fingerprint: 'some-other-fingerprint' });
+
+    await expect(archive.saveRun(candidate, [buildEvent()])).rejects.toThrow();
+
+    const runDirExists2 = await readdir(path.join(archiveDir, 'runs')).then((entries) => entries.includes('new-run'));
+    expect(runDirExists2).toBe(false);
+  });
 });
 
 describe('Archive.loadRun', () => {
@@ -524,6 +546,55 @@ describe('Archive.updateRun', () => {
 
     const reloaded = await archive.loadRun(summary.id);
     expect(reloaded?.summary.notes).toBe(summary.notes);
+  });
+
+  it('fails closed on update when a sibling directory\'s summary id does not match its own directory name', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    // A directory named "dir-a" whose run.json claims id "dir-b" instead.
+    // Even though this could otherwise pass the minimal id/fingerprint
+    // shape, an inconsistent directory/id pairing must never be trusted:
+    // it would let one archived run's on-disk location silently diverge
+    // from what it claims to be, which is corruption regardless of
+    // whether the claimed fingerprint would have collided with anything.
+    const mismatchedDir = path.join(archiveDir, 'runs', 'dir-a');
+    await mkdir(mismatchedDir, { recursive: true });
+    const mismatchedSummary = buildSummary({ id: 'dir-b', fingerprint: 'unrelated-fingerprint' });
+    await writeFile(path.join(mismatchedDir, 'run.json'), `${JSON.stringify(mismatchedSummary, null, 2)}\n`, 'utf8');
+
+    await expect(
+      archive.updateRun(summary.id, ({ summary: current, events }) => ({
+        summary: { ...current, notes: 'should never be persisted' },
+        events,
+      })),
+    ).rejects.toThrow();
+
+    const reloaded = await archive.loadRun(summary.id);
+    expect(reloaded?.summary.notes).toBe(summary.notes);
+  });
+
+  it('excludes the run being updated from duplicate-fingerprint enforcement by its validated identity, not merely because its directory name happens to match', async () => {
+    // A correctness check for the fix itself: excluding the current run
+    // from the fingerprint index must not be a blind "skip whatever
+    // directory happens to be named `id`" shortcut that bypasses the
+    // id/directory consistency check for that very directory. In the
+    // ordinary, uncorrupted case (directory name and summary id always
+    // agree, by construction), this must keep working exactly as before:
+    // an update that does not change its own fingerprint must never be
+    // rejected as colliding with itself.
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    await archive.saveRun(summary, [buildEvent()]);
+
+    const updated = await archive.updateRun(summary.id, ({ summary: current, events }) => ({
+      summary: { ...current, notes: 'self-fingerprint is never a collision' },
+      events,
+    }));
+
+    expect(updated.fingerprint).toBe(summary.fingerprint);
+    expect(updated.notes).toBe('self-fingerprint is never a collision');
   });
 });
 

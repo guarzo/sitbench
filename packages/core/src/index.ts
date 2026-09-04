@@ -1,5 +1,6 @@
 export {
   Archive,
+  ArchiveCorruptionError,
   ArchiveLockedError,
   CatalogRebuildError,
   DuplicateRunError,
