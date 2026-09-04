@@ -4,7 +4,7 @@
 
 Sitbench is a WSL-native TypeScript/Node CLI for measuring and comparing EVE Online PvE site runs. It reads recent EVE gamelogs without modifying them, asks the user to confirm the detected run window and required metadata, stores normalized source data locally, and generates a static dashboard or privacy-controlled export.
 
-The product name, executable, workspace packages, local data directories, skill, dashboard, and documentation use `sitbench`. EVE-specific domain terms and EVE's Windows gamelog paths remain unchanged. Because this is a greenfield project, Sitbench provides no `eve-run` compatibility aliases or migration layer.
+The product name, executable, workspace packages, local data directories, skill, dashboard, and documentation use `sitbench`. EVE-specific domain terms and EVE's Windows gamelog paths remain unchanged. Because this is a greenfield project, Sitbench provides no `eve-run` compatibility aliases or migration layer. The repository's provisional `eve-run.md` plan is not implementation authority: before application work begins, it must be superseded by a Sitbench plan that references this specification and uses Sitbench identifiers throughout.
 
 ## Goals
 
@@ -42,6 +42,8 @@ The CLI exposes `sitbench analyze`, `recalculate`, `edit`, `dashboard`, and `pub
 
 The dashboard is a static Vite application using vanilla TypeScript/DOM and Chart.js. It reads only generated `/data/runs.json`; it never reads normalized event archives. It provides site/profile/date filters, overview metrics, trends, run history, run detail, coverage warnings, per-character local detail, and direct two-run comparisons.
 
+Dashboard datasets are discriminated by `mode: 'local' | 'public'`. Local datasets contain complete `RunSummary` records. Public datasets contain explicit public run records and capability flags indicating whether character data and notes are present. Dashboard components must render from the declared mode and capabilities: identity, per-character, and note UI is hidden when its data is unavailable, while run-level filters, metrics, trends, history, and comparisons continue to work in either mode.
+
 ### Sitbench skill
 
 `packages/skill/SKILL.md` is a thin natural-language wrapper around the installed `sitbench` executable. It does not read logs, calculate metrics, edit archive JSON, or bypass CLI confirmations.
@@ -51,7 +53,7 @@ The dashboard is a static Vite application using vanilla TypeScript/DOM and Char
 1. The CLI resolves an explicit/configured/discovered gamelog directory and the archive directory.
 2. Core parses log headers and supported combat-line families into normalized events with source provenance and coverage counts.
 3. Core classifies unsupported or ambiguous activity conservatively; excluded events are counted.
-4. Core detects candidate episodes using qualifying outgoing NPC damage and a default 180-second inactivity threshold.
+4. Core detects candidate episodes using qualifying outgoing NPC damage. A gap greater than or equal to the default 180-second episode threshold starts a new candidate.
 5. The CLI presents the newest candidate, adjacent activity, and coverage, then requires confirmation or an explicit window adjustment.
 6. The user supplies a site name and fleet profile; these values are never inferred.
 7. Core calculates deterministic metrics and a stable duplicate fingerprint.
@@ -68,9 +70,9 @@ Normalized events retain timestamp, kind, actor, target, amount where applicable
 
 ## Episode and metric semantics
 
-Only outgoing damage to NPC-qualified targets defines candidate episodes and qualifying combat activity. Incoming damage does not bridge episodes. The default split threshold is 180 seconds without qualifying outgoing damage.
+Only outgoing damage to NPC-qualified targets defines candidate episodes and qualifying combat activity. Incoming damage does not bridge episodes. The default episode threshold is 180 seconds: a gap greater than or equal to 180 seconds between consecutive qualifying events starts a new candidate, while a smaller gap remains in the same candidate.
 
-The confirmed elapsed window defaults to the first and last qualifying outgoing NPC-damage events. Total elapsed time is the primary ranking metric. Active combat derives from qualifying activity intervals shorter than the episode threshold; idle time is elapsed minus active combat, clamped at zero. Zero denominators produce zero rather than non-finite values.
+The confirmed elapsed window defaults to the first and last qualifying outgoing NPC-damage events. Total elapsed time is the primary ranking metric. Active combat uses a separate default continuity threshold of 30 seconds. For consecutive qualifying events inside the confirmed window, a gap less than or equal to 30 seconds contributes its full duration to active combat; a larger gap contributes zero. A lone qualifying event therefore contributes zero active seconds. Idle time is confirmed elapsed time minus active combat, clamped at zero. Episode and active thresholds are explicit calculation inputs recorded with the run so recalculation preserves semantics across version changes. Zero denominators produce zero rather than non-finite values.
 
 ## Persistence and recalculation
 
@@ -88,9 +90,9 @@ Recalculation preserves confirmed boundaries, site, fleet profile, notes, and cr
 
 ## Privacy
 
-Local dashboard data may contain complete run summaries, participant identities, per-character metrics, and notes. Public export uses an explicit public schema. By default it excludes raw events, local paths, participant identities, per-character metrics, and notes. Character data and notes are restored only through independent explicit flags.
+Local dashboard data may contain complete run summaries, participant identities, per-character metrics, and notes. Public export uses an explicit public schema rather than deleting keys from local summaries. By default it excludes raw events, local paths, participant identities, per-character metrics, and notes. Character data and notes are restored only through independent explicit flags. Public dataset capability flags must agree with the selected export options, and schema tests must cover the default and every independently enabled private field group.
 
-Publishing copies static dashboard assets plus the generated public dataset to a user-selected directory. It never initializes Git, commits, pushes, or invokes a hosting provider.
+Publishing copies static dashboard assets plus the generated public dataset to a user-selected directory. It never initializes Git, commits, pushes, or invokes a hosting provider. The local dashboard server binds explicitly to `127.0.0.1` by default and does not expose an option to bind private local data to non-loopback interfaces.
 
 ## Errors and warnings
 
@@ -98,7 +100,7 @@ Fatal validation errors prevent archive mutation, including missing site/profile
 
 ## Testing and verification
 
-Development follows test-first steps. Core tests cover schemas, canonicalization, real-shape anonymized parser fixtures when available, normalization, episodes, exact metric arithmetic, fingerprints, atomic archive behavior, comparisons, and privacy shaping. CLI tests use temporary filesystems and injected prompts. Dashboard tests cover selection/filter state and comparison alignment. An end-to-end test runs fixture logs through archive creation, duplicate rejection, recalculation, and local/public dataset generation.
+Development follows test-first steps. Core tests cover schemas, canonicalization, real-shape anonymized parser fixtures when available, normalization, episodes, exact metric arithmetic, fingerprints, atomic archive behavior, comparisons, and privacy shaping. CLI tests use temporary filesystems and injected prompts. Dashboard tests cover selection/filter state and comparison alignment. An end-to-end test runs fixture logs through archive creation, duplicate rejection, recalculation, and local/public dataset generation. Dashboard tests exercise both dataset modes, every public capability combination, and suppression of unavailable identity, character-detail, and note features.
 
 Release verification runs:
 
