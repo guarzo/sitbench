@@ -1,4 +1,5 @@
 import { confirm, input, select } from '@inquirer/prompts';
+import { isIsoDateTime } from '@sitbench/core';
 import type { AnalyzePrompts, CandidateChoice } from './analyze-command.js';
 import type { EditPrompts, WindowEditChoice } from './edit-command.js';
 
@@ -59,11 +60,11 @@ export function createInteractivePrompts(
       if (action === 'adjust') {
         const start = await dependencies.input({
           message: 'Adjusted start (ISO timestamp):',
-          validate: required('An adjusted start timestamp is required.'),
+          validate: isoTimestamp('An adjusted start timestamp is required.'),
         });
         const end = await dependencies.input({
           message: 'Adjusted end (ISO timestamp):',
-          validate: required('An adjusted end timestamp is required.'),
+          validate: isoTimestamp('An adjusted end timestamp is required.'),
         });
         return { action, start: start.trim(), end: end.trim() };
       }
@@ -167,12 +168,12 @@ export function createEditPrompts(dependencies: InteractivePromptDependencies = 
       const start = await dependencies.input({
         message: 'Adjusted start (ISO timestamp):',
         default: current.start,
-        validate: required('An adjusted start timestamp is required.'),
+        validate: isoTimestamp('An adjusted start timestamp is required.'),
       });
       const end = await dependencies.input({
         message: 'Adjusted end (ISO timestamp):',
         default: current.end,
-        validate: required('An adjusted end timestamp is required.'),
+        validate: isoTimestamp('An adjusted end timestamp is required.'),
       });
       return { action: 'adjust', start: start.trim(), end: end.trim() };
     },
@@ -191,4 +192,23 @@ async function requiredProfile(dependencies: InteractivePromptDependencies, init
 
 function required(message: string): (value: string) => boolean | string {
   return (value) => (value.trim().length > 0 ? true : message);
+}
+
+/**
+ * Rejects an adjusted-window timestamp that does not satisfy the persisted
+ * ISO-with-offset contract, in the terminal, before the command boundary
+ * sees it. `Date.parse` would accept forms such as "2026-09-03 05:00" that
+ * the archive can never store, so this uses the same `isIsoDateTime` rule
+ * the command boundary re-checks. Prompt validation is a convenience only:
+ * `runAnalyze`/`runEdit` validate independently, so an injected prompt
+ * cannot bypass it.
+ */
+function isoTimestamp(emptyMessage: string): (value: string) => boolean | string {
+  return (value) => {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) return emptyMessage;
+    return isIsoDateTime(trimmed)
+      ? true
+      : 'Enter an ISO 8601 timestamp with a UTC offset, for example 2026-09-03T05:00:00Z.';
+  };
 }

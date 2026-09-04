@@ -17,6 +17,7 @@ import {
 } from '@sitbench/core';
 import { defaultArchiveDir, loadConfig, resolveGameLogDir, saveConfig, type AnalyzeConfig } from './paths.js';
 import { readRecentLogFiles, type LogDiscovery, type LogFile } from './log-discovery.js';
+import { isValidWindow } from './recalculate-command.js';
 
 export type { LogFile };
 
@@ -140,7 +141,11 @@ export async function runAnalyze(
       ? { start: choice.start, end: choice.end, source: 'manually-adjusted', manuallyAdjusted: true }
       : { start: candidate.start, end: candidate.end, source: 'outgoing-npc-damage', manuallyAdjusted: false };
   if (!isValidWindow(window)) {
-    return fatal(write, 'The adjusted window must have valid timestamps with an end after its start.', 'invalid-window');
+    return fatal(
+      write,
+      'The adjusted window must use ISO 8601 timestamps with a UTC offset (for example 2026-09-03T05:00:00Z) and end after its start.',
+      'invalid-window',
+    );
   }
 
   const siteName = (arguments_.site ?? (await dependencies.prompts.requestSite(undefined))).trim();
@@ -315,12 +320,6 @@ function displayPreview(write: (line: string) => void, summary: RunSummary, comp
   if (comparison.trailingFiveAverageElapsedSeconds !== null) {
     write(`Trailing five average: ${comparison.trailingFiveAverageElapsedSeconds.toFixed(1)}s`);
   }
-}
-
-function isValidWindow(window: RunWindow): boolean {
-  const start = Date.parse(window.start);
-  const end = Date.parse(window.end);
-  return Number.isFinite(start) && Number.isFinite(end) && end > start;
 }
 
 function isInWindow(event: NormalizedEvent, window: RunWindow): boolean {

@@ -26,6 +26,28 @@ describe('createInteractivePrompts', () => {
     });
   });
 
+  it('rejects a non-ISO adjusted timestamp in the analyze prompt validation', async () => {
+    const validationResults: Array<string | boolean | undefined> = [];
+    const answers = ['adjust', '2026-09-03T04:03:55.000Z', '2026-09-03T04:04:25.000Z'];
+    const prompts = createInteractivePrompts({
+      select: async () => answers.shift() as never,
+      input: async (configuration) => {
+        validationResults.push(await configuration.validate?.('2026-09-03 05:00'));
+        validationResults.push(await configuration.validate?.('2026-09-03T04:03:55.000Z'));
+        return answers.shift() as string;
+      },
+      confirm: async () => true,
+    });
+
+    await prompts.confirmCandidate({ candidate, candidates: [candidate] });
+
+    expect(validationResults.filter((result) => result === true)).toHaveLength(2);
+    for (const rejection of validationResults.filter((result) => result !== true)) {
+      expect(String(rejection)).toContain('ISO 8601');
+    }
+    expect(validationResults).toHaveLength(4);
+  });
+
   it('offers an existing profile or creates and validates a nonblank profile name', async () => {
     const validationResults: Array<string | boolean | undefined> = [];
     const prompts = createInteractivePrompts({
@@ -133,6 +155,25 @@ describe('createEditPrompts', () => {
       'An adjusted start timestamp is required.',
       'An adjusted end timestamp is required.',
     ]);
+  });
+
+  it('rejects a non-ISO adjusted timestamp in the edit prompt validation', async () => {
+    const validationResults: Array<string | boolean | undefined> = [];
+    const prompts = createEditPrompts({
+      select: async () => 'adjust',
+      input: async (configuration) => {
+        validationResults.push(await configuration.validate?.('2026-09-03 05:00'));
+        return configuration.default ?? '';
+      },
+      confirm: async () => true,
+    });
+
+    await prompts.requestWindow(currentWindow);
+
+    expect(validationResults).toHaveLength(2);
+    for (const rejection of validationResults) {
+      expect(String(rejection)).toContain('ISO 8601');
+    }
   });
 
   it('confirms save using the pending run id', async () => {

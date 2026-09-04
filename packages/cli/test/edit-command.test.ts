@@ -255,6 +255,31 @@ describe('runEdit', () => {
     expect(reloaded?.summary).toEqual(summary);
   });
 
+  it('rejects an adjusted window that Date.parse accepts but the persisted ISO contract does not', async () => {
+    const summary = buildSummary();
+    const archive = new Archive(archiveDir);
+    await archive.saveRun(summary, [buildEvent()]);
+
+    const result = await runEdit(
+      { runId: summary.id, archive: archiveDir },
+      {
+        prompts: keepWindowPrompts({
+          requestWindow: async () => ({
+            action: 'adjust',
+            // Date.parse understands this; RunWindowSchema does not.
+            start: '2026-09-03 04:00',
+            end: '2026-09-03 06:00',
+          }),
+        }),
+        write: () => undefined,
+      },
+    );
+
+    expect(result).toMatchObject({ status: 'fatal', reason: 'invalid-window' });
+    const reloaded = await archive.loadRun(summary.id);
+    expect(reloaded?.summary).toEqual(summary);
+  });
+
   it('reports an incompatible result and leaves the run untouched when archived events fail the current strict schema', async () => {
     const runDir = path.join(archiveDir, 'runs', 'legacy-run');
     const { mkdir, writeFile } = await import('node:fs/promises');

@@ -8,6 +8,21 @@ import { z } from 'zod';
 const IsoDateTimeString = z.string().datetime({ offset: true });
 
 /**
+ * The single persisted-timestamp contract every archived ISO field
+ * (including `RunWindow.start`/`end`) is validated against. Exported so
+ * command boundaries can reject a user-supplied timestamp against exactly
+ * the same rule the archive will later enforce, instead of relying on
+ * `Date.parse`, which accepts many non-ISO forms (`"2026-09-03 05:00"`,
+ * `"September 3, 2026"`, ...) that would only fail later inside `Archive`.
+ */
+export const IsoDateTimeStringSchema = IsoDateTimeString;
+
+/** True when `value` satisfies the persisted ISO-with-offset timestamp contract. */
+export function isIsoDateTime(value: unknown): boolean {
+  return IsoDateTimeString.safeParse(value).success;
+}
+
+/**
  * A single safe filesystem path segment: must start with a letter or digit
  * and contain only letters, digits, '-', '_', or '.' afterward. This
  * excludes '/', '\\', and NUL, and excludes '.' / '..' (which cannot start

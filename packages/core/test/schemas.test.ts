@@ -4,7 +4,9 @@ import {
   NormalizedEventSchema,
   CharacterMetricsSchema,
   SiteIdentitySchema,
+  RunWindowSchema,
   RUN_ID_PATTERN,
+  isIsoDateTime,
 } from '../src/schemas.js';
 
 function minimalRunSummaryFields(id: string) {
@@ -345,5 +347,37 @@ describe('RunSummarySchema.id path-segment safety', () => {
   it('RUN_ID_PATTERN agrees with the schema for both an accepted and a rejected id', () => {
     expect(RUN_ID_PATTERN.test('2026-09-03T045114Z-core-bastion')).toBe(true);
     expect(RUN_ID_PATTERN.test('../../outside-archive')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isIsoDateTime — the shared persisted-timestamp contract
+// ---------------------------------------------------------------------------
+describe('isIsoDateTime', () => {
+  it.each([
+    '2026-09-03T05:00:00.000Z',
+    '2026-09-03T05:00:00Z',
+    '2026-09-03T05:00:00+02:00',
+  ])('accepts the persisted ISO form %s', (value) => {
+    expect(isIsoDateTime(value)).toBe(true);
+    expect(RunWindowSchema.safeParse({ start: value, end: value, source: 'manual', manuallyAdjusted: true }).success).toBe(true);
+  });
+
+  it.each([
+    // Date.parse accepts these, RunWindowSchema does not.
+    '2026-09-03 05:00',
+    '2026-09-03',
+    'September 3, 2026 05:00:00',
+    '2026-09-03T05:00:00',
+    '',
+    'not a timestamp',
+  ])('rejects the non-schema input %s', (value) => {
+    expect(isIsoDateTime(value)).toBe(false);
+    expect(RunWindowSchema.safeParse({ start: value, end: value, source: 'manual', manuallyAdjusted: true }).success).toBe(false);
+  });
+
+  it('rejects a non-string value', () => {
+    expect(isIsoDateTime(undefined)).toBe(false);
+    expect(isIsoDateTime(Date.parse('2026-09-03T05:00:00.000Z'))).toBe(false);
   });
 });

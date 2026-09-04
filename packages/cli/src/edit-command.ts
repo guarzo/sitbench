@@ -153,7 +153,7 @@ export async function runEdit(arguments_: EditArguments, dependencies: EditDepen
     if (!isValidWindow(candidateWindow)) {
       return fatal(
         write,
-        'The adjusted window must have valid timestamps with an end after its start.',
+        'The adjusted window must use ISO 8601 timestamps with a UTC offset (for example 2026-09-03T05:00:00Z) and end after its start.',
         'invalid-window',
       );
     }

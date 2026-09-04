@@ -301,6 +301,33 @@ describe('runAnalyze', () => {
     expect(runs[0]?.window.start).toBe('2026-09-03T04:04:00.000Z');
   });
 
+  it('rejects an adjusted window that Date.parse accepts but the persisted ISO contract does not', async () => {
+    await writeCandidateLog();
+    const output: string[] = [];
+
+    const result = await runAnalyze(
+      { logs: logsDir, archive: archiveDir },
+      {
+        prompts: {
+          ...newestWindowPrompts,
+          confirmCandidate: async () => ({
+            action: 'adjust',
+            // Date.parse understands these; RunWindowSchema does not, so the
+            // command boundary must reject them itself rather than letting
+            // them reach Archive/Zod.
+            start: '2026-09-03 04:00',
+            end: '2026-09-03 05:00',
+          }),
+        },
+        clock: fixedClock,
+        write: (line) => output.push(line),
+      },
+    );
+
+    expect(result).toMatchObject({ status: 'fatal', reason: 'invalid-window' });
+    expect(await new Archive(archiveDir).listRuns()).toEqual([]);
+  });
+
   it('does not add another run when the confirmed fingerprint already exists', async () => {
     await writeCandidateLog();
     const first = await runAnalyze(

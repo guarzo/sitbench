@@ -4,6 +4,7 @@ import {
   RunNotFoundError,
   calculateRun,
   fingerprintRun,
+  isIsoDateTime,
   type CalculationSettings,
   type CharacterMetrics,
   type NormalizedEvent,
@@ -84,7 +85,22 @@ export function isInWindow(event: NormalizedEvent, window: { start: string; end:
   return timestamp >= Date.parse(window.start) && timestamp <= Date.parse(window.end);
 }
 
+/**
+ * A window is only valid when both boundaries satisfy the *persisted*
+ * ISO-with-offset contract (`isIsoDateTime`, the same rule
+ * `RunWindowSchema` enforces) and represent real instants with the end
+ * after the start. Checking the schema contract before `Date.parse`
+ * matters because `Date.parse` accepts inputs the archive never could
+ * (e.g. `"2026-09-03 05:00"`, which is also timezone-ambiguous); those must
+ * be rejected at the command boundary as `invalid-window`, not surface
+ * later as an opaque Zod failure from `Archive`. The `Number.isFinite`
+ * checks stay because a schema-valid offset such as `"+99:99"` is still
+ * unparseable as an instant.
+ */
 export function isValidWindow(window: { start: string; end: string }): boolean {
+  if (!isIsoDateTime(window.start) || !isIsoDateTime(window.end)) {
+    return false;
+  }
   const start = Date.parse(window.start);
   const end = Date.parse(window.end);
   return Number.isFinite(start) && Number.isFinite(end) && end > start;
