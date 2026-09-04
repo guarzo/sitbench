@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -269,6 +269,36 @@ describe('runAnalyze', () => {
     expect(text).toContain('1 unparsed combat line(s)');
     expect(text).toContain('2 ambiguous event(s) excluded from qualifying analysis');
     expect(text).toContain('not yet supported by NPC classification');
+  });
+
+  it('skips log files outside the recent window even when --logs is explicit, and reports inspected/skipped counts', async () => {
+    await writeCandidateLog();
+    const stalePath = path.join(logsDir, 'stale.txt');
+    await writeFile(
+      stalePath,
+      gameLog('Old Pilot', [
+        '[ 2026.08.01 04:00:00 ] (combat) 999 from Old Pilot[Example] - Heavy Entropic Disintegrator II - Hits Sleepless Guardian',
+      ]),
+      'utf8',
+    );
+    // Older than the recent-log window relative to the injected clock.
+    const staleMtime = new Date(fixedClock().getTime() - 30 * 24 * 60 * 60 * 1000);
+    await utimes(stalePath, staleMtime, staleMtime);
+    const output: string[] = [];
+
+    const result = await runAnalyze(
+      { logs: logsDir, archive: archiveDir },
+      { prompts: newestWindowPrompts, clock: fixedClock, write: (line) => output.push(line) },
+    );
+
+    expect(result.status).toBe('saved');
+    const text = output.join('\n');
+    expect(text).toContain('Coverage: 1 log file(s) inspected');
+    expect(text).toContain('1 skipped');
+    const runs = await new Archive(archiveDir).listRuns();
+    expect(runs[0]?.coverage.logFiles).toBe(1);
+    // The stale file's episode must never appear in the candidate window.
+    expect(runs[0]?.window.start).toBe('2026-09-03T04:04:00.000Z');
   });
 
   it('does not add another run when the confirmed fingerprint already exists', async () => {

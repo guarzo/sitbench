@@ -49,6 +49,8 @@ npx --yes pnpm@10.15.0 test
 
 Pass `--logs <path>` to choose a different directory. The resolved directory is remembered in the local archive configuration for subsequent analyses. Sitbench reads original EVE logs only; it never edits, moves, or uses them as writable test data.
 
+A real `Gamelogs` directory accumulates years of files, so discovery is bounded and never reads the whole directory: only direct `.txt` files modified within the last **7 days** are eligible, at most the newest **256** of those are read, and file access runs in bounded batches. These bounds apply to `--logs` as well. Each analysis reports how many files it inspected and how many it skipped.
+
 The local archive defaults to `$XDG_DATA_HOME/sitbench`, or `~/.local/share/sitbench` when `XDG_DATA_HOME` is unset. It contains each run's `run.json` summary and its local-only normalized `events.jsonl` evidence.
 
 Analysis identifies candidate episodes from outgoing NPC damage. A gap of **180 seconds or more** (three minutes) starts a new episode. Within a confirmed run, active-combat continuity includes consecutive qualifying events separated by **30 seconds or less**. These defaults are persisted with the run so recalculation remains reproducible.

@@ -1,5 +1,3 @@
-import { readdir, readFile, stat } from 'node:fs/promises';
-import * as path from 'node:path';
 import {
   Archive,
   ArchiveLockedError,
@@ -18,6 +16,9 @@ import {
   type RunWindow,
 } from '@sitbench/core';
 import { defaultArchiveDir, loadConfig, resolveGameLogDir, saveConfig, type AnalyzeConfig } from './paths.js';
+import { readRecentLogFiles, type LogDiscovery, type LogFile } from './log-discovery.js';
+
+export type { LogFile };
 
 export interface AnalyzeArguments {
   logs?: string;
@@ -45,15 +46,9 @@ export interface AnalyzeDependencies {
   clock?: () => Date;
   write?: (line: string) => void;
   discoverGameLogDirs?: () => Promise<string[]>;
-  readRecentLogFiles?: (directory: string) => Promise<LogFile[]>;
+  readRecentLogFiles?: (directory: string, options: { now: Date }) => Promise<LogDiscovery>;
   createArchive?: (directory: string) => Archive;
   rebuildCatalog?: (archive: Archive) => Promise<void>;
-}
-
-export interface LogFile {
-  name: string;
-  text: string;
-  modifiedAt: number;
 }
 
 export type AnalyzeResult =
@@ -89,12 +84,14 @@ export async function runAnalyze(
     return fatal(write, 'No game log directory was provided, configured, or discovered.', 'logs');
   }
 
-  let logFiles: LogFile[];
+  const clock = dependencies.clock ?? (() => new Date());
+  let discovery: LogDiscovery;
   try {
-    logFiles = await (dependencies.readRecentLogFiles ?? readRecentLogFiles)(logDirectory);
+    discovery = await (dependencies.readRecentLogFiles ?? readRecentLogFiles)(logDirectory, { now: clock() });
   } catch (error) {
     return fatal(write, `Cannot inspect game logs: ${message(error)}`, 'logs');
   }
+  const logFiles = discovery.files;
 
   const normalized = logFiles.map((file) => normalizeLogFile({ text: file.text, sourceFile: file.name }));
   const events = normalized
@@ -109,7 +106,7 @@ export async function runAnalyze(
     // "the fleet dealt no damage", so the same coverage counts the candidate
     // preview shows are reported here too, together with an explicit
     // unsupported-classification note whenever ambiguous targets were seen.
-    displayCoverage(write, normalized.length, unparsedCombatLines, ambiguousEventsExcluded);
+    displayCoverage(write, normalized.length, discovery.skippedFiles, unparsedCombatLines, ambiguousEventsExcluded);
     if (ambiguousEventsExcluded > 0) {
       write(
         'Note: ambiguous events are outgoing damage whose target could not be confirmed as an NPC. They may indicate target names not yet supported by NPC classification rather than meaning no damage was dealt.',
@@ -123,7 +120,7 @@ export async function runAnalyze(
     return fatal(write, 'No candidate episode was available.', 'no-candidate');
   }
   displayCandidate(write, candidate, candidates);
-  displayCoverage(write, normalized.length, unparsedCombatLines, ambiguousEventsExcluded);
+  displayCoverage(write, normalized.length, discovery.skippedFiles, unparsedCombatLines, ambiguousEventsExcluded);
 
   const choice = await dependencies.prompts.confirmCandidate({ candidate, candidates });
   if (choice.action === 'cancel') {
@@ -170,7 +167,7 @@ export async function runAnalyze(
     episodeThresholdSeconds: config.episodeThresholdSeconds,
     activeCombatGapSeconds: config.activeCombatGapSeconds,
   });
-  const now = (dependencies.clock ?? (() => new Date()))().toISOString();
+  const now = clock().toISOString();
   const summary: RunSummary = {
     schemaVersion: 1,
     parserVersion: '0.1.0',
@@ -273,20 +270,6 @@ async function rebuildCatalogNoop(): Promise<void> {
   // is wired through the rebuildCatalog dependency.
 }
 
-async function readRecentLogFiles(directory: string): Promise<LogFile[]> {
-  const entries = await readdir(directory, { withFileTypes: true });
-  const files = await Promise.all(
-    entries
-      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.txt'))
-      .map(async (entry) => {
-        const filePath = path.join(directory, entry.name);
-        const [text, fileStat] = await Promise.all([readFile(filePath, 'utf8'), stat(filePath)]);
-        return { name: entry.name, text, modifiedAt: fileStat.mtimeMs };
-      }),
-  );
-  return files.sort((left, right) => right.modifiedAt - left.modifiedAt || left.name.localeCompare(right.name));
-}
-
 function coverageFor(events: NormalizedEvent[], logFiles: number, unparsedCombatLines: number, ambiguousEventsExcluded: number): RunSummary['coverage'] {
   const participantsWithOutgoingDamage = new Set(
     events.filter((event) => event.kind === 'damage-dealt').map((event) => event.observedBy),
@@ -309,9 +292,15 @@ function displayCandidate(write: (line: string) => void, candidate: CandidateEpi
 }
 
 /** Reports the same inspected-input counts on both the candidate and no-candidate paths. */
-function displayCoverage(write: (line: string) => void, logFiles: number, unparsed: number, ambiguous: number): void {
+function displayCoverage(
+  write: (line: string) => void,
+  logFiles: number,
+  skippedFiles: number,
+  unparsed: number,
+  ambiguous: number,
+): void {
   write(
-    `Coverage: ${logFiles} log file(s) inspected, ${unparsed} unparsed combat line(s), ${ambiguous} ambiguous event(s) excluded from qualifying analysis.`,
+    `Coverage: ${logFiles} log file(s) inspected, ${skippedFiles} skipped as outside the recent-log window or over the file cap, ${unparsed} unparsed combat line(s), ${ambiguous} ambiguous event(s) excluded from qualifying analysis.`,
   );
 }
 
