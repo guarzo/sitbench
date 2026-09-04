@@ -33,10 +33,19 @@ sitbench recalculate --all
 sitbench publish --out ./public-export
 ```
 
-Sitbench uses the pinned `pnpm@10.15.0` declared in `package.json`. If a local Corepack shim is unavailable, use this environment-safe troubleshooting fallback for an individual command; it does not change the project or package-manager identity:
+Sitbench uses the pinned `pnpm@10.15.0` declared in `package.json`. If a local Corepack shim is unavailable, prefix pnpm commands with `npx --yes pnpm@10.15.0` instead; this does not change the project or package-manager identity:
 
 ```bash
-npx --yes pnpm@10.15.0 test
+npx --yes pnpm@10.15.0 install --frozen-lockfile
+npx --yes pnpm@10.15.0 build
+npx --yes pnpm@10.15.0 --filter @sitbench/cli link --global
+```
+
+After building, you can also run the CLI directly from the checkout without a global link:
+
+```bash
+node packages/cli/dist/index.js --help
+node packages/cli/dist/index.js analyze
 ```
 
 ## Analyze a run
@@ -62,19 +71,73 @@ Before a run is saved, Sitbench requires you to:
 3. optionally provide private notes; and
 4. confirm the displayed summary.
 
-Nothing is saved until the final confirmation. Use `sitbench analyze --site <name> --profile <name>` to supply the two required metadata values on the command line; candidate and save confirmation still protect the archive.
+Nothing is saved until the final confirmation. Supply the two required metadata values on the command line when convenient; candidate and save confirmation still protect the archive:
 
-## Review, recalculate, and serve locally
+```bash
+sitbench analyze --site "Core Bastion" --profile "8 Kikis + 2 Deacons"
+```
 
-Use `sitbench recalculate --all` to recompute every archived run from its confirmed window and archived normalized events. It preserves the durable site, profile, notes, and evidence while refreshing derived metrics.
+To select a non-default log directory:
 
-`sitbench dashboard` prepares local dashboard assets and serves them on `127.0.0.1` only. It has no host/bind override, so the dashboard is reachable from the same machine at the printed loopback URL and is not exposed to the network. Local dashboard data includes private participant metrics and notes from the archive.
+```bash
+sitbench analyze \
+  --logs "/mnt/c/Users/<WindowsUser>/Documents/EVE/logs/Gamelogs" \
+  --site "Core Bastion" \
+  --profile "8 Kikis + 2 Deacons"
+```
+
+After saving, Sitbench prints `Saved run <run-id>.` Keep that ID for editing or recalculating the run. If needed, archived run IDs are also the directory names under `<archive>/runs/`, such as `~/.local/share/sitbench/runs/<run-id>/` with the default archive location.
+
+## Review, edit, recalculate, and serve locally
+
+Edit a saved run's site, fleet profile, notes, or confirmed window interactively:
+
+```bash
+sitbench edit <run-id>
+```
+
+Changing the confirmed window recalculates its derived metrics and fingerprint from the archived normalized events. Metadata-only edits preserve those values.
+
+Recalculate one run or every archived run from its confirmed window and archived normalized events:
+
+```bash
+sitbench recalculate <run-id>
+sitbench recalculate --all
+```
+
+Recalculation preserves the durable site, profile, notes, and evidence while refreshing derived metrics.
+
+`sitbench dashboard` prepares local dashboard assets and serves them on `127.0.0.1` only. It has no host/bind override, so the dashboard is reachable from the same machine at the printed loopback URL and is not exposed to the network. Local dashboard data includes private participant metrics and notes from the archive. Press `Ctrl+C` to stop it.
+
+Use an ephemeral port by default, or select a fixed port:
+
+```bash
+sitbench dashboard
+sitbench dashboard --port 8080
+```
 
 ## Export public data deliberately
 
 `sitbench publish --out ./public-export` copies dashboard assets and writes a static public dataset. By default it omits participant names, per-character metrics, notes, archived events, raw log text, source-file paths, fingerprints, and record timestamps. The command refuses output paths that overlap the archive.
 
-Use `--include-characters` and/or `--include-notes` only after reviewing the output and deciding that disclosure is appropriate. Public export is a static file bundle: Sitbench does not initialize a repository, deploy it, configure hosting, or guarantee that a chosen host will preserve the same access controls. Treat the output directory as data intended for sharing.
+Use `--include-characters` and/or `--include-notes` only after reviewing the output and deciding that disclosure is appropriate:
+
+```bash
+sitbench publish \
+  --out ./public-export \
+  --include-characters \
+  --include-notes
+```
+
+Public export is a static file bundle: Sitbench does not initialize a repository, deploy it, configure hosting, or guarantee that a chosen host will preserve the same access controls. Treat the output directory as data intended for sharing.
+
+To inspect the export locally, serve the directory over HTTP rather than opening `index.html` directly:
+
+```bash
+python3 -m http.server 8000 --directory ./public-export
+```
+
+Then open `http://127.0.0.1:8000/` and stop the server with `Ctrl+C` when finished.
 
 ## Validation status
 
