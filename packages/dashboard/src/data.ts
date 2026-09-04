@@ -58,9 +58,12 @@ export function validateDataset(raw: unknown): DashboardDataset {
 
 /**
  * Fetches and validates the dashboard dataset from the conventional
- * `/data/runs.json` path (relative to document root).
+ * `data/runs.json` path, relative to the current document URL. The path is
+ * deliberately relative (no leading slash) so the same build works both at
+ * a loopback root and under a project subpath such as
+ * `https://user.github.io/<project>/`.
  */
-export async function loadDataset(basePath = '/data/runs.json'): Promise<DashboardDataset> {
+export async function loadDataset(basePath = 'data/runs.json'): Promise<DashboardDataset> {
   const response = await fetch(basePath);
   if (!response.ok) {
     throw new DatasetSchemaError(`Failed to load dataset: HTTP ${String(response.status)}`);
