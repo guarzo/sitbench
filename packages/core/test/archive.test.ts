@@ -650,6 +650,50 @@ describe('writeFileAtomic (temp-file cleanup on failure)', () => {
     const archiveEntries = await readdir(archiveDir);
     expect(archiveEntries.some((name) => name.startsWith('.tmp-'))).toBe(false);
   });
+
+  it('removes its temp file and preserves the pre-existing target file content when an injected post-temp-write rename step fails', async () => {
+    // Unlike the directory-conflict case above (which fails for a reason
+    // native to fs.rename semantics), this injects the failure directly at
+    // the exact post-temp-write, pre-rename boundary via the dependency
+    // seam, against a genuine pre-existing FILE target (not a directory
+    // conflict trick), proving the write is atomic at that precise point.
+    const targetPath = path.join(archiveDir, 'target-file.json');
+    await writeFile(targetPath, '{"original":true}', 'utf8');
+
+    await expect(
+      writeFileAtomic(targetPath, '{"new":true}', {
+        rename: async () => {
+          throw new Error('simulated rename failure');
+        },
+      }),
+    ).rejects.toThrow('simulated rename failure');
+
+    // The pre-existing target file content must be completely untouched.
+    const preserved = await readFile(targetPath, 'utf8');
+    expect(preserved).toBe('{"original":true}');
+
+    // No leftover .tmp-* file anywhere in the archive directory.
+    const archiveEntries = await readdir(archiveDir);
+    expect(archiveEntries.some((name) => name.startsWith('.tmp-'))).toBe(false);
+  });
+
+  it('uses the injected rename step instead of the native fs.rename when both are viable', async () => {
+    const targetPath = path.join(archiveDir, 'target-injected.json');
+    let calledWith: [string, string] | null = null;
+
+    await writeFileAtomic(targetPath, '{"written":true}', {
+      rename: async (oldPath, newPath) => {
+        calledWith = [oldPath, newPath];
+        const { rename } = await import('node:fs/promises');
+        await rename(oldPath, newPath);
+      },
+    });
+
+    expect(calledWith).not.toBeNull();
+    expect(calledWith?.[1]).toBe(targetPath);
+    const written = await readFile(targetPath, 'utf8');
+    expect(written).toBe('{"written":true}');
+  });
 });
 
 describe('writeRunDirectoryAtomic (temp-directory cleanup on failure)', () => {

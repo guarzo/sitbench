@@ -79,12 +79,27 @@ function assertSafeRunId(id: string): void {
 }
 
 /**
+ * Injectable steps for `writeFileAtomic`, so tests can simulate a failure
+ * at a precise point in the temp-write-then-rename sequence without
+ * changing the default (native) behavior for every real caller.
+ */
+export interface WriteFileAtomicDependencies {
+  /** Defaults to `rename` from `node:fs/promises`. */
+  rename?: (oldPath: string, newPath: string) => Promise<void>;
+}
+
+/**
  * Writes content to a temp file in the same directory, then renames it into
  * place atomically. If any step fails, the temp file is removed in
  * `finally`; the (possibly pre-existing) target path is never touched
  * except by a successful rename.
  */
-export async function writeFileAtomic(targetPath: string, content: string): Promise<void> {
+export async function writeFileAtomic(
+  targetPath: string,
+  content: string,
+  dependencies: WriteFileAtomicDependencies = {},
+): Promise<void> {
+  const renameStep = dependencies.rename ?? rename;
   const dir = path.dirname(targetPath);
   await mkdir(dir, { recursive: true });
   const tmpPath = path.join(dir, `${TMP_PREFIX}${randomUUID()}`);
@@ -97,7 +112,7 @@ export async function writeFileAtomic(targetPath: string, content: string): Prom
     } finally {
       await handle.close();
     }
-    await rename(tmpPath, targetPath);
+    await renameStep(tmpPath, targetPath);
     renamed = true;
   } finally {
     if (!renamed) {

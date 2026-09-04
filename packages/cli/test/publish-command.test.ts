@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { Archive, type RunSummary } from '@sitbench/core';
+import { Archive, writeFileAtomic, type RunSummary } from '@sitbench/core';
 import { runPublish } from '../src/publish-command.js';
 import { validateDataset } from '@sitbench/dashboard/data';
 import { initializeState, matchingRuns } from '@sitbench/dashboard/state';
@@ -201,7 +201,12 @@ describe('runPublish', () => {
     expect(dataDirEntries.every((name) => !name.startsWith('.tmp-'))).toBe(true);
   });
 
-  it('returns fatal and preserves the prior runs.json unchanged, with no temp artifacts, when the injected dataset writer fails', async () => {
+  it('returns fatal and preserves the prior runs.json unchanged, with no temp artifacts, when the real atomic writer\'s rename step fails', async () => {
+    // Uses the real writeFileAtomic (not a trivially-throwing stand-in), with
+    // its own rename step failure injected via its dependency seam, so this
+    // genuinely exercises the post-temp-write, pre-rename failure boundary
+    // through the actual production write path -- not just a mock that
+    // never touches the filesystem at all.
     const archive = new Archive(archiveDir);
     await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
     const outDir = path.join(root, 'out-atomic-failure');
@@ -213,9 +218,12 @@ describe('runPublish', () => {
       {
         distDir: fakeDistDir,
         write: () => undefined,
-        writeDataset: async () => {
-          throw new Error('simulated disk failure');
-        },
+        writeDataset: async (targetPath, content) =>
+          writeFileAtomic(targetPath, content, {
+            rename: async () => {
+              throw new Error('simulated rename failure');
+            },
+          }),
       },
     );
 
@@ -420,6 +428,116 @@ describe('runPublish', () => {
       expect(result.status).toBe('published');
       const html = await readFile(path.join(prefixOutDir, 'index.html'), 'utf8');
       expect(html).toContain('sitbench dashboard');
+    });
+
+    it('rejects publishing when --out is a directory literally named "..published" directly inside the archive (dot-prefixed name must not be mistaken for an upward path segment)', async () => {
+      const archive = new Archive(archiveDir);
+      await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+      const dotPrefixedOutDir = path.join(archiveDir, '..published');
+
+      const result = await runPublish(
+        { out: dotPrefixedOutDir, archive: archiveDir },
+        { distDir: fakeDistDir, write: () => undefined },
+      );
+
+      expect(result.status).toBe('fatal');
+      const archiveEntries = await readdir(archiveDir);
+      expect(archiveEntries).not.toContain('..published');
+    });
+
+    it('rejects publishing when the archive directory is literally named "..secret-archive" directly inside --out (reverse direction of the same dot-prefixed-name check)', async () => {
+      const dotPrefixedArchiveDir = path.join(root, 'out-parent', '..secret-archive');
+      await mkdir(dotPrefixedArchiveDir, { recursive: true });
+      const nestedArchive = new Archive(dotPrefixedArchiveDir);
+      await nestedArchive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+      const outParentDir = path.join(root, 'out-parent');
+
+      const result = await runPublish(
+        { out: outParentDir, archive: dotPrefixedArchiveDir },
+        { distDir: fakeDistDir, write: () => undefined },
+      );
+
+      expect(result.status).toBe('fatal');
+      const outParentEntries = await readdir(outParentDir);
+      expect(outParentEntries).toEqual(['..secret-archive']);
+    });
+
+    it('publishes successfully to a sibling directory whose name starts with two literal dots (no false-positive upward-path detection)', async () => {
+      const archive = new Archive(archiveDir);
+      await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+      const dotPrefixedSiblingOutDir = path.join(root, '..published-sibling');
+
+      const result = await runPublish(
+        { out: dotPrefixedSiblingOutDir, archive: archiveDir },
+        { distDir: fakeDistDir, write: () => undefined },
+      );
+
+      expect(result.status).toBe('published');
+      const html = await readFile(path.join(dotPrefixedSiblingOutDir, 'index.html'), 'utf8');
+      expect(html).toContain('sitbench dashboard');
+    });
+  });
+
+  describe('recursive symlink protection inside managed assets/data directories', () => {
+    it('rejects publishing when a destination file matching a source built asset basename is a symlink nested inside an existing assets directory', async () => {
+      const archive = new Archive(archiveDir);
+      await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+      const outDir = path.join(root, 'out-nested-basename-symlink');
+      await mkdir(path.join(outDir, 'assets'), { recursive: true });
+      const outsideTarget = path.join(root, 'outside-app-js-target.txt');
+      await writeFile(outsideTarget, 'outside app.js content', 'utf8');
+      // "app.js" matches the real basename shipped by fakeDistDir/assets/app.js.
+      await symlink(outsideTarget, path.join(outDir, 'assets', 'app.js'));
+
+      const result = await runPublish(
+        { out: outDir, archive: archiveDir },
+        { distDir: fakeDistDir, write: () => undefined },
+      );
+
+      expect(result.status).toBe('fatal');
+      expect(await readFile(outsideTarget, 'utf8')).toBe('outside app.js content');
+      const assetsStat = await lstat(path.join(outDir, 'assets', 'app.js'));
+      expect(assetsStat.isSymbolicLink()).toBe(true);
+    });
+
+    it('rejects publishing when a symlink exists nested arbitrarily deep inside an existing assets directory, even when nothing in the source dist shares its path', async () => {
+      const archive = new Archive(archiveDir);
+      await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+      const outDir = path.join(root, 'out-nested-deep-symlink');
+      await mkdir(path.join(outDir, 'assets', 'subdir'), { recursive: true });
+      const outsideTarget = path.join(root, 'outside-deep-target.txt');
+      await writeFile(outsideTarget, 'outside deep content', 'utf8');
+      await symlink(outsideTarget, path.join(outDir, 'assets', 'subdir', 'evil-link.js'));
+
+      const result = await runPublish(
+        { out: outDir, archive: archiveDir },
+        { distDir: fakeDistDir, write: () => undefined },
+      );
+
+      expect(result.status).toBe('fatal');
+      expect(await readFile(outsideTarget, 'utf8')).toBe('outside deep content');
+      // The copy must never have even started -- the top-level asset it would
+      // have written is absent.
+      const assetsEntries = await readdir(path.join(outDir, 'assets'));
+      expect(assetsEntries).not.toContain('app.js');
+    });
+
+    it('rejects publishing when a symlink exists nested inside an existing data directory that predates the publish', async () => {
+      const archive = new Archive(archiveDir);
+      await archive.saveRun(buildSummary('run-a', '2026-09-01T10:00:00.000Z'), []);
+      const outDir = path.join(root, 'out-nested-data-symlink');
+      await mkdir(path.join(outDir, 'data', 'nested'), { recursive: true });
+      const outsideTarget = path.join(root, 'outside-data-target.txt');
+      await writeFile(outsideTarget, 'outside data content', 'utf8');
+      await symlink(outsideTarget, path.join(outDir, 'data', 'nested', 'evil-link.json'));
+
+      const result = await runPublish(
+        { out: outDir, archive: archiveDir },
+        { distDir: fakeDistDir, write: () => undefined },
+      );
+
+      expect(result.status).toBe('fatal');
+      expect(await readFile(outsideTarget, 'utf8')).toBe('outside data content');
     });
   });
 });

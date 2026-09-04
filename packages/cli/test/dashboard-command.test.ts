@@ -373,4 +373,75 @@ describe('runDashboard', () => {
       await result.close();
     }
   });
+
+  it('regenerates when the run with the latest updatedAt has a schema-valid but Date.parse-unparseable offset (e.g. "+99:99")', async () => {
+    // z.string().datetime({ offset: true }) validates the offset with
+    // /([+-]\d{2}:?\d{2})/, which does not bound hours to 00-23 or minutes
+    // to 00-59 -- so "+99:99" is schema-valid but Date.parse returns NaN.
+    const archive = new Archive(archiveDir);
+    const run = buildSummary('run-a', '2026-09-01T10:00:00.000Z', {
+      updatedAt: '2026-09-01T10:00:00.000+99:99',
+    });
+    await archive.saveRun(run, []);
+
+    // A schema-valid dataset with a plausible generatedAt that would look
+    // "fresh" under any comparison that lets a NaN accidentally win.
+    const datasetWithUnparseableRunUpdatedAt = {
+      schemaVersion: 1,
+      mode: 'local',
+      generatedAt: '2099-01-01T00:00:00.000Z',
+      capabilities: { characters: true, notes: true },
+      runs: [run],
+    };
+    await mkdir(path.join(archiveDir, 'dashboard', 'data'), { recursive: true });
+    await writeFile(
+      path.join(archiveDir, 'dashboard', 'data', 'runs.json'),
+      JSON.stringify(datasetWithUnparseableRunUpdatedAt),
+      'utf8',
+    );
+
+    const result = await runDashboard({ archive: archiveDir, port: 0 }, { distDir: fakeDistDir, write: () => undefined });
+    expect(result.status).toBe('serving');
+    if (result.status !== 'serving') return;
+    try {
+      const raw = JSON.parse(
+        await readFile(path.join(archiveDir, 'dashboard', 'data', 'runs.json'), 'utf8'),
+      ) as { generatedAt: string };
+      expect(raw.generatedAt).not.toBe('2099-01-01T00:00:00.000Z');
+    } finally {
+      await result.close();
+    }
+  });
+
+  it('regenerates when the existing dataset generatedAt has a schema-valid but Date.parse-unparseable offset (e.g. "+99:99")', async () => {
+    const archive = new Archive(archiveDir);
+    const run = buildSummary('run-a', '2026-09-01T10:00:00.000Z');
+    await archive.saveRun(run, []);
+
+    const datasetWithUnparseableGeneratedAt = {
+      schemaVersion: 1,
+      mode: 'local',
+      generatedAt: '2026-09-01T10:00:00.000+99:99',
+      capabilities: { characters: true, notes: true },
+      runs: [run],
+    };
+    await mkdir(path.join(archiveDir, 'dashboard', 'data'), { recursive: true });
+    await writeFile(
+      path.join(archiveDir, 'dashboard', 'data', 'runs.json'),
+      JSON.stringify(datasetWithUnparseableGeneratedAt),
+      'utf8',
+    );
+
+    const result = await runDashboard({ archive: archiveDir, port: 0 }, { distDir: fakeDistDir, write: () => undefined });
+    expect(result.status).toBe('serving');
+    if (result.status !== 'serving') return;
+    try {
+      const raw = JSON.parse(
+        await readFile(path.join(archiveDir, 'dashboard', 'data', 'runs.json'), 'utf8'),
+      ) as { generatedAt: string };
+      expect(raw.generatedAt).not.toBe('2026-09-01T10:00:00.000+99:99');
+    } finally {
+      await result.close();
+    }
+  });
 });

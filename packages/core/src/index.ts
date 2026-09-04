@@ -8,6 +8,7 @@ export {
   RunNotFoundError,
   writeFileAtomic,
 } from './archive.js';
+export type { WriteFileAtomicDependencies } from './archive.js';
 export * from './canonicalize.js';
 export { buildLocalDashboardDataset, buildPublicDashboardDataset, DashboardCapabilitiesSchema, DashboardDatasetSchema, LocalDashboardDatasetSchema, PublicDashboardDatasetSchema } from './export.js';
 export type {

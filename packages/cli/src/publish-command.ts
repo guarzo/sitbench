@@ -52,10 +52,24 @@ async function resolveCanonicalPath(targetPath: string): Promise<string> {
   }
 }
 
-/** True when `a` and `b` are the same canonical path, or either is an ancestor of the other. */
+/**
+ * True when `a` and `b` are the same canonical path, or either is an
+ * ancestor of the other. "Upward" is judged structurally, never lexically:
+ * only `path.relative`'s exact `".."` segment (the whole relative path is
+ * precisely two dots) or a `".." + path.sep` prefix (the start of a real
+ * `../`-style traversal) count as upward. A relative path that merely
+ * *starts with* the two characters ".." as part of a longer ordinary name
+ * -- e.g. a descendant literally named `"..published"`, whose relative
+ * path is the single segment `"..published"` -- is not upward: it is a
+ * normal ordinary path segment and must be treated as "inside".
+ */
 function pathsOverlap(a: string, b: string): boolean {
-  const isAncestorOrSame = (relative: string): boolean =>
-    relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  const isAncestorOrSame = (relative: string): boolean => {
+    if (relative === '') return true;
+    if (path.isAbsolute(relative)) return false;
+    const isUpward = relative === '..' || relative.startsWith(`..${path.sep}`);
+    return !isUpward;
+  };
   return isAncestorOrSame(path.relative(a, b)) || isAncestorOrSame(path.relative(b, a));
 }
 
@@ -70,6 +84,41 @@ async function assertNoSymlinkAt(targetPath: string): Promise<void> {
   }
   if (stats.isSymbolicLink()) {
     throw new Error(`Refusing to write through an existing symlink at "${targetPath}".`);
+  }
+}
+
+function isNotDirectoryError(error: unknown): error is NodeJS.ErrnoException {
+  return typeof error === 'object' && error !== null && (error as NodeJS.ErrnoException).code === 'ENOTDIR';
+}
+
+/**
+ * Refuses to proceed if `rootDir` itself, or any entry nested anywhere
+ * inside it however deep, already exists as a symlink -- so a managed copy
+ * or write can never silently leave a pre-planted symlink untouched (and
+ * therefore still reachable in the published output) merely because it
+ * does not happen to share a name with anything the packaged dist ships.
+ * A symlinked directory is never descended into (its own contents are
+ * never listed), so no external target is ever read. A missing `rootDir`,
+ * or one that turns out to be a plain file rather than a directory, is
+ * safe: there is nothing further to check.
+ */
+async function assertNoSymlinksWithin(rootDir: string): Promise<void> {
+  await assertNoSymlinkAt(rootDir);
+  let entries;
+  try {
+    entries = await readdir(rootDir, { withFileTypes: true });
+  } catch (error) {
+    if (isMissingFileError(error) || isNotDirectoryError(error)) return;
+    throw error;
+  }
+  for (const entry of entries) {
+    const entryPath = path.join(rootDir, entry.name);
+    if (entry.isSymbolicLink()) {
+      throw new Error(`Refusing to write through an existing symlink at "${entryPath}".`);
+    }
+    if (entry.isDirectory()) {
+      await assertNoSymlinksWithin(entryPath);
+    }
   }
 }
 
@@ -135,16 +184,15 @@ export async function runPublish(
     const entries = await readdir(distDir, { withFileTypes: true });
     for (const entry of entries) {
       const destination = path.join(outDir, entry.name);
-      await assertNoSymlinkAt(destination);
+      await assertNoSymlinksWithin(destination);
       await cp(path.join(distDir, entry.name), destination, {
         recursive: true,
         force: true,
       });
     }
     const dataDir = path.join(outDir, 'data');
-    await assertNoSymlinkAt(dataDir);
+    await assertNoSymlinksWithin(dataDir);
     const datasetPath = path.join(dataDir, 'runs.json');
-    await assertNoSymlinkAt(datasetPath);
     await writeDataset(datasetPath, `${JSON.stringify(dataset, null, 2)}\n`);
   } catch (error) {
     return fatal(write, `Cannot publish dashboard: ${message(error)}`);

@@ -100,6 +100,15 @@ async function isDashboardDataStale(dataPath: string, runs: RunSummary[]): Promi
 
   const mostRecentUpdateMs = runs.reduce((max, run) => Math.max(max, Date.parse(run.updatedAt)), 0);
   const generatedAtMs = Date.parse(dataset.generatedAt);
+  if (!Number.isFinite(mostRecentUpdateMs) || !Number.isFinite(generatedAtMs)) {
+    // A schema-valid timestamp is not necessarily parseable: the offset
+    // pattern z.string().datetime({ offset: true }) validates against
+    // (/([+-]\d{2}:?\d{2})/) does not bound hours to 00-23 or minutes to
+    // 00-59 (e.g. "+99:99" passes schema validation but Date.parse returns
+    // NaN). Any comparison side that cannot be trusted as a real instant
+    // is treated as stale, never as "wins the comparison" by accident.
+    return true;
+  }
   return mostRecentUpdateMs > generatedAtMs;
 }
 
