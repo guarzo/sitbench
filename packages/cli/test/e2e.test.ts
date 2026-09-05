@@ -29,6 +29,10 @@ function gameLog(character: string, lines: string[]): string {
   return ['------------------------------------------------------------', '  Gamelog', `  Listener: ${character}`, '------------------------------------------------------------', ...lines].join('\n');
 }
 
+function eveDamageLine(timestamp: string, amount: number): string {
+  return `[ ${timestamp} ] (combat) <color=0xff00ffff><b>${String(amount)}</b> <color=0x77ffffff><font size=10>to</font> <b><color=0xffffffff>Sleepless Guardian</b><font size=10><color=0x77ffffff> - Heavy Entropic Disintegrator II - Hits`;
+}
+
 const prompts: AnalyzePrompts = {
   confirmCandidate: async () => ({ action: 'accept' }),
   requestSite: async () => 'Core Bastion',
@@ -38,16 +42,13 @@ const prompts: AnalyzePrompts = {
 };
 
 describe('Sitbench end-to-end workflow', () => {
-  it('archives a confirmed two-character episode, rejects duplicates, recalculates, and exports private data safely by default', async () => {
+  it('archives a confirmed two-character episode from real EVE markup, rejects duplicates, recalculates, and exports private data safely by default', async () => {
     const arcLines = [
-      '[ 2026.09.03 04:00:00 ] (combat) 17 from Arc One[Example] - Heavy Entropic Disintegrator II - Hits Sleepless Guardian',
-      '[ 2026.09.03 04:04:00 ] (combat) 100 from Arc One[Example] - Heavy Entropic Disintegrator II - Hits Sleepless Guardian',
-      '[ 2026.09.03 04:04:20 ] (combat) 200 from Arc One[Example] - Heavy Entropic Disintegrator II - Hits Sleepless Guardian',
+      eveDamageLine('2026.09.03 04:00:00', 17),
+      eveDamageLine('2026.09.03 04:04:00', 100),
+      eveDamageLine('2026.09.03 04:04:20', 200),
     ];
-    const boltLines = [
-      '[ 2026.09.03 04:04:10 ] (combat) 300 from Bolt Two[Example] - Heavy Entropic Disintegrator II - Hits Sleepless Guardian',
-      '[ 2026.09.03 04:04:40 ] (combat) 400 from Bolt Two[Example] - Heavy Entropic Disintegrator II - Hits Sleepless Guardian',
-    ];
+    const boltLines = [eveDamageLine('2026.09.03 04:04:10', 300), eveDamageLine('2026.09.03 04:04:40', 400)];
     await Promise.all([
       writeFile(path.join(logsDir, 'Arc One.txt'), gameLog('Arc One', arcLines), 'utf8'),
       writeFile(path.join(logsDir, 'Bolt Two.txt'), gameLog('Bolt Two', boltLines), 'utf8'),
@@ -72,6 +73,7 @@ describe('Sitbench end-to-end workflow', () => {
     expect(saved).not.toBeNull();
     if (saved === null) throw new Error('Expected the saved run to be loadable from the archive.');
 
+    expect(saved.summary.parserVersion).toBe('0.2.0');
     expect(saved.summary.metrics.elapsedSeconds).toBe(40);
     expect(saved.summary.metrics.fleetDamageDealt).toBe(1000);
     expect(saved.summary.characterMetrics.map((metric) => [metric.character, metric.damageDealt])).toEqual([

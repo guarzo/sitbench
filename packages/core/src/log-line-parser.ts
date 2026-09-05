@@ -10,18 +10,29 @@ import { classifyTarget } from './target-classifier.js';
 
 const TIMESTAMPED_COMBAT_LINE =
   /^\[ (?<year>\d{4})\.(?<month>\d{2})\.(?<day>\d{2}) (?<hour>\d{2}):(?<minute>\d{2}):(?<second>\d{2}) \] \(combat\) (?<body>.+)$/;
-const HIT_QUALITY_PATTERN = 'Hits|Smashes|Penetrates|Glances Off|Barely Scratches|Wrecking';
+const HIT_QUALITY_PATTERN = 'Hits|Smashes|Penetrates|Grazes|Glances Off|Barely Scratches|Wrecks|Wrecking';
 const OUTGOING_DAMAGE_LINE = new RegExp(
   `^(?<amount>\\d+) from (?<actor>.+?) - (?<weapon>.+?) - (?<hitQuality>${HIT_QUALITY_PATTERN}) (?<target>.+)$`,
 );
+const EVE_OUTGOING_DAMAGE_LINE = new RegExp(
+  `^(?<amount>\\d+) to (?<target>.+?) - (?<weapon>.+?) - (?<hitQuality>${HIT_QUALITY_PATTERN})$`,
+);
+const EVE_MARKUP = /<\/?b>|<\/?font(?:\s+[^>]*)?>|<\/?color(?:=[^>]*)?>/gi;
 const INCOMING_DAMAGE_LINE = new RegExp(
   `^(?<amount>\\d+) from (?<actor>.+?) - (?<hitQuality>${HIT_QUALITY_PATTERN}) (?<target>.+)$`,
+);
+const EVE_INCOMING_DAMAGE_LINE = new RegExp(
+  `^(?<amount>\\d+) from (?<actor>.+?) - (?<weapon>.+?) - (?<hitQuality>${HIT_QUALITY_PATTERN})$`,
 );
 const MISS_LINE = /^Your (?<weapon>.+?) misses (?<target>.+?) completely$/;
 const REMOTE_REPAIR_DELIVERED_LINE =
   /^(?<amount>\d+) remote (?<repairKind>shield boosted|armor repaired) to (?<target>.+?) by (?<actor>.+)$/;
+const EVE_REMOTE_REPAIR_DELIVERED_LINE =
+  /^(?<amount>\d+) remote (?<repairKind>shield boosted|armor repaired) to (?<target>.+?) - (?<module>.+)$/;
 const REMOTE_REPAIR_RECEIVED_LINE =
   /^(?<amount>\d+) remote (?<repairKind>shield boosted|armor repaired) by (?<actor>.+?) to (?<target>.+)$/;
+const EVE_REMOTE_REPAIR_RECEIVED_LINE =
+  /^(?<amount>\d+) remote (?<repairKind>shield boosted|armor repaired) by (?<actor>.+?) - (?<module>.+)$/;
 
 export interface SourceContext {
   observedBy: string;
@@ -60,7 +71,7 @@ export function inspectCombatLine(line: string, source: SourceContext): CombatLi
     return { status: 'malformed' };
   }
 
-  const body = requiredGroup(envelope.groups.body);
+  const body = requiredGroup(envelope.groups.body).replace(EVE_MARKUP, '').trim();
   const baseEvent = {
     timestamp,
     observedBy: source.observedBy,
@@ -68,6 +79,24 @@ export function inspectCombatLine(line: string, source: SourceContext): CombatLi
     sourceLine: source.sourceLine,
     raw: line,
   };
+
+  const eveOutgoingDamage = EVE_OUTGOING_DAMAGE_LINE.exec(body);
+  if (eveOutgoingDamage?.groups) {
+    const target = requiredGroup(eveOutgoingDamage.groups.target).trim();
+
+    return {
+      status: 'parsed',
+      event: DamageDealtSchema.parse({
+        ...baseEvent,
+        kind: 'damage-dealt',
+        actor: source.observedBy,
+        target,
+        amount: Number.parseInt(requiredGroup(eveOutgoingDamage.groups.amount), 10),
+        hitQuality: requiredGroup(eveOutgoingDamage.groups.hitQuality),
+        targetClassification: classifyTarget(target),
+      }),
+    };
+  }
 
   const outgoingDamage = OUTGOING_DAMAGE_LINE.exec(body);
   if (outgoingDamage?.groups) {
@@ -88,6 +117,21 @@ export function inspectCombatLine(line: string, source: SourceContext): CombatLi
         amount: Number.parseInt(requiredGroup(outgoingDamage.groups.amount), 10),
         hitQuality: requiredGroup(outgoingDamage.groups.hitQuality),
         targetClassification: classifyTarget(target),
+      }),
+    };
+  }
+
+  const eveIncomingDamage = EVE_INCOMING_DAMAGE_LINE.exec(body);
+  if (eveIncomingDamage?.groups) {
+    return {
+      status: 'parsed',
+      event: DamageTakenSchema.parse({
+        ...baseEvent,
+        kind: 'damage-taken',
+        actor: requiredGroup(eveIncomingDamage.groups.actor).trim(),
+        target: source.observedBy,
+        amount: Number.parseInt(requiredGroup(eveIncomingDamage.groups.amount), 10),
+        hitQuality: requiredGroup(eveIncomingDamage.groups.hitQuality),
       }),
     };
   }
@@ -129,6 +173,20 @@ export function inspectCombatLine(line: string, source: SourceContext): CombatLi
     };
   }
 
+  const eveRemoteRepairDelivered = EVE_REMOTE_REPAIR_DELIVERED_LINE.exec(body);
+  if (eveRemoteRepairDelivered?.groups) {
+    return {
+      status: 'parsed',
+      event: RemoteRepairDeliveredSchema.parse({
+        ...baseEvent,
+        kind: 'remote-repair-delivered',
+        actor: source.observedBy,
+        target: requiredGroup(eveRemoteRepairDelivered.groups.target).trim(),
+        amount: Number.parseInt(requiredGroup(eveRemoteRepairDelivered.groups.amount), 10),
+      }),
+    };
+  }
+
   const remoteRepairDelivered = REMOTE_REPAIR_DELIVERED_LINE.exec(body);
   if (remoteRepairDelivered?.groups) {
     const actor = requiredGroup(remoteRepairDelivered.groups.actor).trim();
@@ -145,6 +203,20 @@ export function inspectCombatLine(line: string, source: SourceContext): CombatLi
         actor: source.observedBy,
         target: requiredGroup(remoteRepairDelivered.groups.target).trim(),
         amount: Number.parseInt(requiredGroup(remoteRepairDelivered.groups.amount), 10),
+      }),
+    };
+  }
+
+  const eveRemoteRepairReceived = EVE_REMOTE_REPAIR_RECEIVED_LINE.exec(body);
+  if (eveRemoteRepairReceived?.groups) {
+    return {
+      status: 'parsed',
+      event: RemoteRepairReceivedSchema.parse({
+        ...baseEvent,
+        kind: 'remote-repair-received',
+        actor: requiredGroup(eveRemoteRepairReceived.groups.actor).trim(),
+        target: source.observedBy,
+        amount: Number.parseInt(requiredGroup(eveRemoteRepairReceived.groups.amount), 10),
       }),
     };
   }

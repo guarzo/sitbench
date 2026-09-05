@@ -175,7 +175,7 @@ export async function runAnalyze(
   const now = clock().toISOString();
   const summary: RunSummary = {
     schemaVersion: 1,
-    parserVersion: '0.1.0',
+    parserVersion: '0.2.0',
     metricsVersion: '0.1.0',
     id: `${runIdTimestamp(now)}-${runIdSiteSegment(siteKey)}`,
     site: { name: siteName, key: siteKey },
