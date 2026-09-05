@@ -34,6 +34,59 @@ describe('parseCombatLine', () => {
     });
   });
 
+  it('parses markup-formatted outgoing damage from real EVE logs', () => {
+    const raw =
+      '[ 2026.09.03 04:51:14 ] (combat) <color=0xff00ffff><b>1183</b> <color=0x77ffffff><font size=10>to</font> <b><color=0xffffffff>Sleepless Guardian</b><font size=10><color=0x77ffffff> - Heavy Entropic Disintegrator II - Hits';
+    const event = parseCombatLine(raw, {
+      observedBy: 'Dah Nee',
+      sourceFile: 'real-damage-session.txt',
+      sourceLine: 5,
+    });
+
+    expect(event).toMatchObject({
+      timestamp: '2026-09-03T04:51:14.000Z',
+      kind: 'damage-dealt',
+      actor: 'Dah Nee',
+      target: 'Sleepless Guardian',
+      amount: 1183,
+      hitQuality: 'Hits',
+      targetClassification: 'npc',
+      raw,
+    });
+  });
+
+  it.each(['Grazes', 'Wrecks'])('parses the real EVE hit quality %s', (hitQuality) => {
+    const raw =
+      `[ 2026.09.03 04:51:14 ] (combat) <color=0xff00ffff><b>1183</b> <color=0x77ffffff><font size=10>to</font> <b><color=0xffffffff>Sleepless Guardian</b><font size=10><color=0x77ffffff> - Heavy Entropic Disintegrator II - ${hitQuality}`;
+    const event = parseCombatLine(raw, {
+      observedBy: 'Dah Nee',
+      sourceFile: 'real-damage-session.txt',
+      sourceLine: 5,
+    });
+
+    expect(event).toMatchObject({ kind: 'damage-dealt', hitQuality });
+  });
+
+  it('parses markup-formatted incoming damage from real EVE logs', () => {
+    const raw =
+      '[ 2026.09.03 04:51:15 ] (combat) <color=0xffcc0000><b>341</b> <color=0x77ffffff><font size=10>from</font> <b><color=0xffffffff>Sleepless Guardian</b><font size=10><color=0x77ffffff> - Phantasmata Missile - Hits';
+    const event = parseCombatLine(raw, {
+      observedBy: 'Dah Nee',
+      sourceFile: 'real-damage-session.txt',
+      sourceLine: 6,
+    });
+
+    expect(event).toMatchObject({
+      timestamp: '2026-09-03T04:51:15.000Z',
+      kind: 'damage-taken',
+      actor: 'Sleepless Guardian',
+      target: 'Dah Nee',
+      amount: 341,
+      hitQuality: 'Hits',
+      raw,
+    });
+  });
+
   it('parses incoming damage lines into damage-taken events instead of misattributing the target away from the observer', () => {
     const raw = damageLines[5];
     const event = parseCombatLine(raw, {
@@ -77,6 +130,25 @@ describe('parseCombatLine', () => {
     });
   });
 
+  it('parses markup-formatted remote repairs delivered in real EVE logs', () => {
+    const raw =
+      '[ 2026.09.03 04:52:02 ] (combat) <color=0xffccff66><b>320</b><color=0x77ffffff><font size=10> remote armor repaired to </font><b><color=0xffffffff>Ally Pilot</b><color=0x77ffffff><font size=10> - Coreli B-Type Small Remote Armor Repairer</font>';
+    const event = parseCombatLine(raw, {
+      observedBy: 'Dah Nee',
+      sourceFile: 'real-repair-session.txt',
+      sourceLine: 5,
+    });
+
+    expect(event).toMatchObject({
+      timestamp: '2026-09-03T04:52:02.000Z',
+      kind: 'remote-repair-delivered',
+      actor: 'Dah Nee',
+      target: 'Ally Pilot',
+      amount: 320,
+      raw,
+    });
+  });
+
   it('parses remote-repair delivered lines instead of losing outgoing logistics contributions', () => {
     const raw = repairLines[4];
     const event = parseCombatLine(raw, {
@@ -94,6 +166,25 @@ describe('parseCombatLine', () => {
       observedBy: 'Dah Nee',
       sourceFile: 'repair-session.txt',
       sourceLine: 5,
+      raw,
+    });
+  });
+
+  it('parses markup-formatted remote repairs received in real EVE logs', () => {
+    const raw =
+      '[ 2026.09.03 04:52:01 ] (combat) <color=0xffccff66><b>280</b><color=0x77ffffff><font size=10> remote armor repaired by </font><b><color=0xffffffff>Ally Pilot</b><color=0x77ffffff><font size=10> - Coreli B-Type Small Remote Armor Repairer</font>';
+    const event = parseCombatLine(raw, {
+      observedBy: 'Dah Nee',
+      sourceFile: 'real-repair-session.txt',
+      sourceLine: 6,
+    });
+
+    expect(event).toMatchObject({
+      timestamp: '2026-09-03T04:52:01.000Z',
+      kind: 'remote-repair-received',
+      actor: 'Ally Pilot',
+      target: 'Dah Nee',
+      amount: 280,
       raw,
     });
   });
