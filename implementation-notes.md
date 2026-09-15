@@ -3,7 +3,7 @@
 ## What changed and how it works
 
 - Core parses the verified incoming red-amount EVE neutralization line into a `neut-received` event, preserving raw text and observer/source provenance. Unmarked or other-direction variants remain unsupported.
-- Per-character `neutPressure` contains total GJ, average GJ/s, peak rolling 10-second GJ/s, and event count. Calculation explicitly opts into recorded evidence; absent legacy data is not silently converted to zero.
+- Per-character `neutPressure` contains total GJ, average GJ/s, peak rolling 10-second GJ/s, and event count. Calculation explicitly opts into recorded evidence; absent legacy data is not silently converted to zero. Full archive summaries reject contradictions between recorded coverage and per-character metric presence; public summary schemas remain separate.
 - New analysis records availability. Recalculation carries it forward. Window shrink recalculates from retained evidence; expansion clears availability until backfill is run again.
 - `backfill-neuts [run-id]` / `--all`, with optional `--dry-run`, `--logs`, and `--archive`, reads referenced source files without the recent-log discovery cutoff. It validates safe paths, listeners, and archived raw-line positions, then supplements only neut evidence inside the confirmed window.
 - Backfill preserves existing non-neut metrics and observations, site/profile/notes, run ID, creation time, and window. A newly recovered neut-only participant is added to character metrics and participant count. The fingerprint, metrics version, update time, and availability are refreshed. Original parser version and ingestion coverage counts are retained.
@@ -23,7 +23,7 @@
 
 From the feature worktree:
 
-- `pnpm test`: 517 passing tests (192 core, 146 dashboard, 179 CLI).
+- `pnpm test`: 521 passing tests (196 core, 146 dashboard, 179 CLI).
 - `pnpm typecheck`: all packages passed.
 - `pnpm build`: all packages passed.
 - `git diff --check`: passed.
@@ -31,9 +31,10 @@ From the feature worktree:
 - Additional coverage includes same-second hits, inclusive run boundaries, fixed/half-open peak windows, short and zero-duration calculations, legacy archive loading, privacy exports, source mismatch/path rejection, dry-run immutability, repeated backfill, concurrency conflicts, mixed batches, and derivative warnings.
 - Real-log rehearsal on disposable archive copies: CLI dry-run, backfill, repeated backfill, and recalculation succeeded for all nine available runs. Independent raw-log calculations matched per-character totals/counts/averages/peaks. Existing non-neut values and durable metadata were checked for preservation. Live records and original logs were not modified.
 - Chrome smoke check at desktop and 390px mobile widths: table data rendered, fractional rates preserved, no page overflow, explanation visible outside horizontal scrolling, table keyboard-focusable, no observed runtime errors. Screenshots inspected.
-- Four scoped polish reviews covered general correctness, failure paths, type contracts, and documentation. Verified task bugs were corrected and re-tested; remaining source-completeness and multi-file persistence limitations are documented above.
+- Four scoped implementation polish reviews covered general correctness, failure paths, type contracts, and documentation. Verified task bugs were corrected and re-tested; remaining source-completeness and multi-file persistence limitations are documented above.
+- A fresh pre-PR polish pass found no further issues. CodeRabbit reviewed all 27 changed files and emitted two duplicate reports of one validation gap: coverage and per-character neut metrics could contradict each other. Added full-summary consistency validation and four regressions (both rejection directions, legacy absence, and recorded zero). The two rejection cases failed before the fix, and all verification gates passed afterward.
 
-Not verified: other EVE locales/neutralization formats, full historical source completeness, or crash recovery across both archive files. No live backfill, install switch, merge, push, or deployment was performed.
+Not verified: other EVE locales/neutralization formats, full historical source completeness, or crash recovery across both archive files. Live backfill, installed-CLI activation, merge, and deployment remain outside this PR's rollout.
 
 ## Reviewer focus / knowledge check
 

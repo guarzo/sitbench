@@ -55,6 +55,41 @@ function minimalRunSummaryFields(id: string) {
 // Existing brief-mandated test (preserved verbatim)
 // ---------------------------------------------------------------------------
 describe('RunSummarySchema', () => {
+  const character = {
+    character: 'First', damageDealt: 0, fleetDamageShare: 0, averageDps: 0, activeDps: 0,
+    damageTaken: 0, remoteRepairDelivered: 0, remoteRepairReceived: 0,
+    shotsHit: 0, shotsMissed: 0, missRate: 0, hitQualityCounts: {},
+    firstRelevantEvent: null, lastRelevantEvent: null,
+  };
+  const pressure = { totalGj: 0, averageGjPerSecond: 0, peak10sGjPerSecond: 0, eventCount: 0 };
+
+  it.each([false, true])('rejects character metrics that contradict neut availability (recorded: %s)', (recorded) => {
+    const summary = minimalRunSummaryFields('inconsistent-neut-run');
+    const result = RunSummarySchema.safeParse({
+      ...summary,
+      coverage: { ...summary.coverage, ...(recorded ? { neutPressure: 'recorded' } : {}) },
+      characterMetrics: [
+        { ...character, ...(recorded ? { neutPressure: pressure } : {}) },
+        { ...character, character: 'Second', ...(!recorded ? { neutPressure: pressure } : {}) },
+      ],
+    });
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error('Expected inconsistent neut availability to be rejected');
+    expect(result.error.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: ['characterMetrics', 1, 'neutPressure'] }),
+    ]));
+  });
+
+  it.each([false, true])('accepts consistent legacy absence or recorded zero metrics (recorded: %s)', (recorded) => {
+    const summary = minimalRunSummaryFields('consistent-neut-run');
+    const input = {
+      ...summary,
+      coverage: { ...summary.coverage, ...(recorded ? { neutPressure: 'recorded' } : {}) },
+      characterMetrics: [{ ...character, ...(recorded ? { neutPressure: pressure } : {}) }],
+    };
+    expect(RunSummarySchema.parse(input)).toEqual(input);
+  });
+
   it('round-trips recorded neutralization coverage without changing the summary version', () => {
     const summary = minimalRunSummaryFields('recorded-neut-run');
     const recorded = { ...summary, coverage: { ...summary.coverage, neutPressure: 'recorded' } };

@@ -325,7 +325,21 @@ export const RunSummarySchema = z
     createdAt: IsoDateTimeString,
     updatedAt: IsoDateTimeString,
   })
-  .strict();
+  .strict()
+  .superRefine((summary, context) => {
+    const recorded = summary.coverage.neutPressure === 'recorded';
+    for (const [index, metric] of summary.characterMetrics.entries()) {
+      if ((metric.neutPressure !== undefined) !== recorded) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['characterMetrics', index, 'neutPressure'],
+          message: recorded
+            ? 'Recorded neut coverage requires neut metrics for every character.'
+            : 'Neut metrics require recorded neut coverage.',
+        });
+      }
+    }
+  });
 
 export type RunSummary = z.infer<typeof RunSummarySchema>;
 
