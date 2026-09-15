@@ -17,7 +17,7 @@ import {
 } from '@sitbench/core';
 import { defaultArchiveDir, loadConfig, resolveGameLogDir, saveConfig, type AnalyzeConfig } from './paths.js';
 import { readRecentLogFiles, type LogDiscovery, type LogFile } from './log-discovery.js';
-import { isValidWindow } from './recalculate-command.js';
+import { isValidWindow, METRICS_VERSION } from './recalculate-command.js';
 
 export type { LogFile };
 
@@ -171,12 +171,12 @@ export async function runAnalyze(
   const calculated = calculateRun(runEvents, window, {
     episodeThresholdSeconds: config.episodeThresholdSeconds,
     activeCombatGapSeconds: config.activeCombatGapSeconds,
-  });
+  }, { neutPressureAvailable: true });
   const now = clock().toISOString();
   const summary: RunSummary = {
     schemaVersion: 1,
-    parserVersion: '0.2.0',
-    metricsVersion: '0.1.0',
+    parserVersion: '0.3.0',
+    metricsVersion: METRICS_VERSION,
     id: `${runIdTimestamp(now)}-${runIdSiteSegment(siteKey)}`,
     site: { name: siteName, key: siteKey },
     fleetProfile: { id: profileId, name: profileName },
@@ -288,6 +288,7 @@ function coverageFor(events: NormalizedEvent[], logFiles: number, unparsedCombat
     unparsedCombatLines,
     ambiguousEventsExcluded,
     repairPairing: repairs.length === 0 ? 'none' : 'partial',
+    neutPressure: 'recorded',
   };
 }
 

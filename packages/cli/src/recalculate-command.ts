@@ -38,13 +38,8 @@ export type RecalculateResult =
   | { status: 'partial'; outcomes: RecalculateOutcome[] }
   | { status: 'fatal'; reason: string };
 
-/**
- * The current metrics-calculation version. There is no incrementing
- * version-bump scheme yet beyond this single literal, which matches the
- * value `analyze` already writes for every newly saved run; recalculation
- * sets it explicitly rather than leaving a stale prior value in place.
- */
-export const METRICS_VERSION = '0.1.0';
+/** Shared by analysis, recalculation, edits, and neut backfill. */
+export const METRICS_VERSION = '0.2.0';
 
 export interface RecalculatedFields {
   calculation: CalculationSettings;
@@ -62,16 +57,18 @@ export interface RecalculatedFields {
  * `calculateRun`/`fingerprintRun` filter internally by `window` bounds, so
  * passing the complete archived events here is both correct and keeps
  * callers from accidentally truncating what gets persisted. Coverage is
- * ingestion provenance recorded once at analyze-time; this function
- * intentionally has no coverage input or output — callers must carry the
- * current summary's `coverage` over unchanged.
+ * ingestion provenance; only its neut-availability marker controls whether
+ * neut metrics can be reported. Callers preserve the coverage itself.
  */
 export function recalculateFields(
   window: RunWindow,
   events: NormalizedEvent[],
   calculation: CalculationSettings,
+  coverage?: RunSummary['coverage'],
 ): RecalculatedFields {
-  const calculated = calculateRun(events, window, calculation);
+  const calculated = calculateRun(events, window, calculation, {
+    neutPressureAvailable: coverage?.neutPressure === 'recorded',
+  });
   return {
     calculation: calculated.calculation,
     metrics: calculated.metrics,
@@ -190,7 +187,7 @@ async function recalculateOne(
   let catalogWarning: string | null = null;
   try {
     await archive.updateRun(id, ({ summary, events }) => {
-      const fields = recalculateFields(summary.window, events, summary.calculation);
+      const fields = recalculateFields(summary.window, events, summary.calculation, summary.coverage);
       const nextSummary: RunSummary = {
         ...summary,
         calculation: fields.calculation,

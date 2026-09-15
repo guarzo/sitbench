@@ -105,7 +105,42 @@ sitbench recalculate <run-id>
 sitbench recalculate --all
 ```
 
-Recalculation preserves the durable site, profile, notes, and evidence while refreshing derived metrics.
+Recalculation preserves the durable site, profile, notes, and evidence while refreshing derived metrics. It does not re-read original logs or recover event kinds that an older parser discarded.
+
+### Observed neut drain and historical backfill
+
+New analyses record incoming energy-neutralizer events per character. The detail dashboard shows:
+
+- **Total GJ:** logged capacitor drained inside the confirmed run window.
+- **Avg GJ/s:** total divided by the entire run's elapsed seconds.
+- **Peak 10s GJ/s:** the largest sum in a rolling `(t − 10 seconds, t]` interval divided by 10. The denominator stays 10 even for runs shorter than ten seconds.
+- **Events:** logged incoming neut applications, preserving simultaneous hits.
+
+This measures **observed drain**, not theoretical neut strength, capacitor percentage, or time capped out. Only the verified incoming EVE line shape with red amount markup is recognized; unmarked or other-direction variants are not guessed. A character's own log must be supplied. As with other incoming metrics, the confirmed run window determines what counts; neuts do not change episode detection or active-combat time.
+
+Runs created before neut support show **Unavailable**, not zero. Ordinary recalculation preserves this distinction. To recover historical data, first build/use the updated CLI and make a backup of your archive, then preview the backfill:
+
+```bash
+sitbench backfill-neuts --all --dry-run
+sitbench backfill-neuts --all
+```
+
+Or target one run and specify the original log directory:
+
+```bash
+sitbench backfill-neuts <run-id> --logs /path/to/Gamelogs --dry-run
+sitbench backfill-neuts <run-id> --logs /path/to/Gamelogs
+```
+
+`--archive <path>` is supported for testing on a copy. Without `--logs`, backfill uses the archive's configured log directory. It reads only filenames referenced by archived evidence, without the normal seven-day/file-count discovery limits. Every referenced file must be present, have the matching listener, and match the archived raw lines at their recorded positions. Missing or unsafe source paths, listener mismatches, and changes/truncation affecting those archived positions leave that run untouched; other runs in `--all` can still succeed, and an incomplete batch exits nonzero.
+
+**Historical coverage is source-limited:** old archives did not retain discarded lines or a complete source-file inventory. Backfill cannot detect edits to formerly unsupported lines, truncation after the last archived observation, or an additional session file that contributed no archived events. Totals and recorded zeros describe the referenced logs as supplied, not proof of complete fleet coverage. Keep the original session logs intact.
+
+Backfill supplements normalized evidence with in-window neuts and updates neut metrics, their availability marker, the content fingerprint, metrics version, and update timestamp. It preserves run IDs, site/profile/notes, confirmed windows, creation timestamps, existing non-neut observations, and other metric values. Original parser-version and coverage counts remain the provenance of the initial ingestion, rather than being relabelled as a full reparse. A recovered neut-only character from retained source evidence is added to the character list and participant count. Already-recorded runs are skipped without needing the original logs, so repeats do not duplicate events. Original EVE logs are never written.
+
+Shrinking a confirmed window recalculates neut metrics from retained evidence. Expanding it clears neut availability until `backfill-neuts` is run for the expanded window. Per-character neut metrics remain private in default public exports and are included only with `--include-characters`.
+
+**Compatibility:** the updated CLI reads legacy archives, but older builds reject the added fields. Use the updated build for analysis, editing, recalculation, dashboard serving, and publishing after backfill. Archive updates use the existing archive lock and per-file atomic writes, not a crash-safe multi-file transaction; retain your pre-backfill backup.
 
 `sitbench dashboard` prepares local dashboard assets and serves them on `127.0.0.1` only. It has no host/bind override, so the dashboard is reachable from the same machine at the printed loopback URL and is not exposed to the network. Local dashboard data includes private participant metrics and notes from the archive. Press `Ctrl+C` to stop it.
 

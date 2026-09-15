@@ -2,6 +2,8 @@ import type {
   CalculationSettings,
   CharacterMetrics,
   DamageDealt,
+  NeutPressureMetrics,
+  NeutReceived,
   NormalizedEvent,
   RunMetrics,
   RunWindow,
@@ -13,6 +15,11 @@ export interface CalculatedRun {
   calculation: CalculationSettings;
   metrics: RunMetrics;
   characterMetrics: CharacterMetrics[];
+}
+
+export interface CalculateRunOptions {
+  /** Whether incoming neutralization was recorded; unavailable by default. */
+  neutPressureAvailable?: boolean;
 }
 
 const DEFAULT_CALCULATION_SETTINGS: CalculationSettings = {
@@ -62,13 +69,47 @@ function computeActiveCombatSeconds(sortedQualifying: DamageDealt[], activeComba
   return active;
 }
 
+function computeNeutPressure(events: NeutReceived[], elapsedSeconds: number): NeutPressureMetrics {
+  const hits = events
+    .map((event) => ({ timestampMs: Date.parse(event.timestamp), amount: event.amount }))
+    .sort((left, right) => left.timestampMs - right.timestampMs);
+  let left = 0;
+  let rollingGj = 0;
+  let peakGj = 0;
+
+  for (const hit of hits) {
+    let oldest = hits[left];
+    // Half-open (t - 10s, t]: a hit exactly ten seconds old has expired.
+    while (oldest !== undefined && oldest.timestampMs <= hit.timestampMs - 10_000) {
+      rollingGj -= oldest.amount;
+      left += 1;
+      oldest = hits[left];
+    }
+    rollingGj += hit.amount;
+    peakGj = Math.max(peakGj, rollingGj);
+  }
+
+  const totalGj = sumAmount(events);
+  return {
+    totalGj,
+    averageGjPerSecond: safeDivide(totalGj, elapsedSeconds),
+    peak10sGjPerSecond: peakGj / 10,
+    eventCount: events.length,
+  };
+}
+
 interface FleetContext {
   fleetDamageDealt: number;
   elapsedSeconds: number;
   activeCombatSeconds: number;
 }
 
-function buildCharacterMetrics(character: string, windowEvents: NormalizedEvent[], fleet: FleetContext): CharacterMetrics {
+function buildCharacterMetrics(
+  character: string,
+  windowEvents: NormalizedEvent[],
+  fleet: FleetContext,
+  options: CalculateRunOptions,
+): CharacterMetrics {
   const own = windowEvents.filter((event) => event.observedBy === character);
   const qualifyingDamage = own.filter(isQualifyingNpcDamage);
   const damageDealt = sumAmount(qualifyingDamage);
@@ -96,6 +137,12 @@ function buildCharacterMetrics(character: string, windowEvents: NormalizedEvent[
 
   return {
     character,
+    ...(options.neutPressureAvailable === true ? {
+      neutPressure: computeNeutPressure(
+        own.filter((event) => event.kind === 'neut-received'),
+        fleet.elapsedSeconds,
+      ),
+    } : {}),
     damageDealt,
     fleetDamageShare: safeDivide(damageDealt, fleet.fleetDamageDealt),
     averageDps: safeDivide(damageDealt, fleet.elapsedSeconds),
@@ -121,12 +168,15 @@ function buildCharacterMetrics(character: string, windowEvents: NormalizedEvent[
  * consecutive qualifying (`damage-dealt` + `targetClassification: 'npc'`)
  * events: gaps less than or equal to `activeCombatGapSeconds` add their full
  * duration; larger gaps add nothing. Every ratio metric returns 0 instead of
- * NaN/Infinity when its denominator is zero.
+ * NaN/Infinity when its denominator is zero. Incoming neutralization metrics
+ * are included only when `options.neutPressureAvailable` is true; the peak
+ * uses a fixed 10-second denominator even for shorter runs.
  */
 export function calculateRun(
   events: NormalizedEvent[],
   window: RunWindow,
   settings?: Partial<CalculationSettings>,
+  options: CalculateRunOptions = {},
 ): CalculatedRun {
   const calculation = resolveSettings(settings);
   const startMs = Date.parse(window.start);
@@ -150,7 +200,7 @@ export function calculateRun(
   const characters = Array.from(new Set(windowEvents.map((event) => event.observedBy))).sort();
 
   const fleetContext: FleetContext = { fleetDamageDealt, elapsedSeconds, activeCombatSeconds };
-  const characterMetrics = characters.map((character) => buildCharacterMetrics(character, windowEvents, fleetContext));
+  const characterMetrics = characters.map((character) => buildCharacterMetrics(character, windowEvents, fleetContext, options));
 
   const metrics: RunMetrics = {
     elapsedSeconds,

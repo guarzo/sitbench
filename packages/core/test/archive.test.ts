@@ -1,3 +1,4 @@
+import { mkdirSync, renameSync } from 'node:fs';
 import { mkdir, mkdtemp, open, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -272,6 +273,34 @@ describe('Archive.saveRun', () => {
 });
 
 describe('Archive.loadRun', () => {
+  it('loads a pre-neutralization summary without inventing recorded coverage or zero pressure', async () => {
+    const summary = buildSummary({
+      characterMetrics: [{
+        character: 'Dah Nee', damageDealt: 100, fleetDamageShare: 1,
+        averageDps: 0.13, activeDps: 0.14, damageTaken: 0,
+        remoteRepairDelivered: 0, remoteRepairReceived: 0,
+        shotsHit: 1, shotsMissed: 0, missRate: 0, hitQualityCounts: { Hits: 1 },
+        firstRelevantEvent: '2026-09-03T04:51:14.000Z',
+        lastRelevantEvent: '2026-09-03T04:51:14.000Z',
+      }],
+    });
+    // Simulate an existing archive rather than passing through the current writer.
+    const runDir = path.join(archiveDir, 'runs', summary.id);
+    await mkdir(runDir, { recursive: true });
+    const originalJson = JSON.stringify(summary);
+    await writeFile(path.join(runDir, 'run.json'), originalJson, 'utf8');
+    await writeFile(path.join(runDir, 'events.jsonl'), `${JSON.stringify(buildEvent())}\n`, 'utf8');
+
+    const archive = new Archive(archiveDir);
+    const loaded = await archive.loadRun(summary.id);
+
+    expect(loaded?.summary).toEqual(summary);
+    expect(loaded?.summary.coverage).not.toHaveProperty('neutPressure');
+    expect(loaded?.summary.characterMetrics[0]).not.toHaveProperty('neutPressure');
+    expect(await archive.listRuns()).toEqual([summary]);
+    expect(await readFile(path.join(runDir, 'run.json'), 'utf8')).toBe(originalJson);
+  });
+
   it('fails clearly with ArchiveLockedError when the archive is locked by another process', async () => {
     const archive = new Archive(archiveDir);
     const summary = buildSummary();
@@ -397,6 +426,61 @@ describe('Archive.updateRun', () => {
 
     const reloaded = await archive.loadRun(summary.id);
     expect(reloaded?.summary.notes).toBe('Great run');
+  });
+
+  it('preserves the old summary and availability when writing evidence fails, then allows retry', async () => {
+    const archive = new Archive(archiveDir);
+    const summary = buildSummary();
+    const events = [buildEvent()];
+    await archive.saveRun(summary, events);
+
+    const runDir = path.join(archiveDir, 'runs', summary.id);
+    const summaryPath = path.join(runDir, 'run.json');
+    const eventsPath = path.join(runDir, 'events.jsonl');
+    const backupPath = path.join(runDir, 'events.backup');
+    const originalSummary = await readFile(summaryPath, 'utf8');
+    const originalEvents = await readFile(eventsPath, 'utf8');
+    const nextSummary: RunSummary = {
+      ...summary,
+      coverage: { ...summary.coverage, neutPressure: 'recorded' },
+    };
+    const nextEvents: NormalizedEvent[] = [...events, {
+      kind: 'neut-received',
+      timestamp: '2026-09-03T04:51:14.000Z',
+      observedBy: 'Dah Nee',
+      sourceFile: 'Gamelogs_20260903.txt',
+      sourceLine: 2,
+      raw: 'neut-line',
+      actor: 'Sleepless Guardian',
+      target: 'Dah Nee',
+      amount: 100,
+    }];
+
+    try {
+      await expect(archive.updateRun(summary.id, () => {
+        // Obstruct the destination only after updateRun has loaded the old evidence.
+        renameSync(eventsPath, backupPath);
+        mkdirSync(eventsPath);
+        return { summary: nextSummary, events: nextEvents };
+      })).rejects.toMatchObject({ syscall: 'rename', dest: eventsPath });
+    } finally {
+      await rm(eventsPath, { recursive: true });
+      renameSync(backupPath, eventsPath);
+    }
+
+    expect(await readFile(summaryPath, 'utf8')).toBe(originalSummary);
+    expect(await readFile(eventsPath, 'utf8')).toBe(originalEvents);
+    const preserved = await archive.loadRun(summary.id);
+    expect(preserved).toEqual({ summary, events });
+    expect(preserved?.summary.coverage).not.toHaveProperty('neutPressure');
+    expect((await readdir(runDir)).sort()).toEqual(['events.jsonl', 'run.json']);
+
+    const updated = await archive.updateRun(summary.id, ({ summary: current }) => {
+      expect(current.coverage).not.toHaveProperty('neutPressure');
+      return { summary: nextSummary, events: nextEvents };
+    });
+    expect(updated.coverage.neutPressure).toBe('recorded');
+    expect(await archive.loadRun(summary.id)).toEqual({ summary: updated, events: nextEvents });
   });
 
   it('rebuilds the catalog after an update', async () => {

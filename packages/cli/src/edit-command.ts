@@ -83,8 +83,9 @@ class EditConflictError extends Error {}
  * only the *metrics/fingerprint computation* is windowed, never what gets
  * persisted) using the run's recorded calculation thresholds, marks
  * `window.manuallyAdjusted: true`, and recomputes the window-dependent
- * fingerprint. Coverage is ingestion provenance and is never recomputed by
- * an edit. If the run was mutated by another process after this edit loaded
+ * fingerprint. Ingestion counts remain unchanged; expanding the window
+ * clears neut availability because the additional interval was not recorded.
+ * If the run was mutated by another process after this edit loaded
  * it, the update is rejected as a conflict rather than silently overwriting
  * that concurrent change. A newly entered fleet profile is persisted via
  * `Archive.upsertProfile` only once the edit is confirmed and successfully
@@ -141,6 +142,7 @@ export async function runEdit(arguments_: EditArguments, dependencies: EditDepen
   const windowChoice = await dependencies.prompts.requestWindow(current.window);
 
   let window = current.window;
+  const coverage = { ...current.coverage };
   let recalculated: RecalculatedFieldsForEdit | null = null;
 
   if (windowChoice.action === 'adjust') {
@@ -163,7 +165,14 @@ export async function runEdit(arguments_: EditArguments, dependencies: EditDepen
     // The full archived event stream (`events`) is handed to core alongside
     // the new window; core filters internally. Nothing narrower than the
     // complete archived stream is ever computed from or persisted here.
-    const fields = recalculateFields(candidateWindow, events, current.calculation);
+    if (Date.parse(candidateWindow.start) < Date.parse(current.window.start) ||
+        Date.parse(candidateWindow.end) > Date.parse(current.window.end)) {
+      if (coverage.neutPressure === 'recorded') {
+        write('Warning: expanding the window makes neut metrics unavailable until backfill-neuts is run again.');
+      }
+      delete coverage.neutPressure;
+    }
+    const fields = recalculateFields(candidateWindow, events, current.calculation, coverage);
     window = candidateWindow;
     recalculated = {
       calculation: fields.calculation,
@@ -181,6 +190,7 @@ export async function runEdit(arguments_: EditArguments, dependencies: EditDepen
     fleetProfile: { id: profileId, name: profileName },
     notes,
     window,
+    coverage,
     ...(recalculated === null
       ? {}
       : {

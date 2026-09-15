@@ -109,7 +109,7 @@ describe('runRecalculate', () => {
     // Coverage is ingestion provenance and must be preserved wholesale, not
     // recomputed from the (differently-scoped) windowed events.
     expect(reloaded?.summary.coverage).toEqual(summary.coverage);
-    expect(reloaded?.summary.metricsVersion).toBe('0.1.0');
+    expect(reloaded?.summary.metricsVersion).toBe('0.2.0');
     expect(Date.parse(reloaded!.summary.updatedAt)).toBeGreaterThanOrEqual(Date.parse(summary.updatedAt));
 
     expect(output.join('\n')).toContain(`Recalculated run ${summary.id}.`);
@@ -195,7 +195,7 @@ describe('runRecalculate', () => {
     // The valid run was still recalculated even though enumeration also found
     // an incompatible one; the incompatible one's run.json is untouched.
     const reloadedValid = await archive.loadRun(validSummary.id);
-    expect(reloadedValid?.summary.metricsVersion).toBe('0.1.0');
+    expect(reloadedValid?.summary.metricsVersion).toBe('0.2.0');
   });
 
   it('reports a partial status when every requested run in a batch is incompatible', async () => {

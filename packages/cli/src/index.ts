@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command, CommanderError, InvalidArgumentError } from 'commander';
 import { runAnalyze, type AnalyzeArguments, type AnalyzeResult } from './analyze-command.js';
+import { runBackfill, type BackfillArguments, type BackfillResult } from './backfill-command.js';
 import { runDashboard, type DashboardArguments, type DashboardResult } from './dashboard-command.js';
 import { regenerateDashboardData } from './dashboard-export.js';
 import { runEdit, type EditArguments, type EditResult } from './edit-command.js';
@@ -15,6 +16,7 @@ import { createConsolePrompts, createEditPrompts } from './ui.js';
 export interface ProgramDependencies {
   execute?: (arguments_: AnalyzeArguments) => Promise<AnalyzeResult>;
   executeRecalculate?: (arguments_: RecalculateArguments) => Promise<RecalculateResult>;
+  executeBackfill?: (arguments_: BackfillArguments) => Promise<BackfillResult>;
   executeEdit?: (arguments_: EditArguments) => Promise<EditResult>;
   executeDashboard?: (arguments_: DashboardArguments) => Promise<DashboardResult>;
   executePublish?: (arguments_: PublishArguments) => Promise<PublishResult>;
@@ -68,6 +70,21 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
     });
 
   program
+    .command('backfill-neuts')
+    .description('add incoming neut evidence to historical runs from their original logs')
+    .argument('[run-id]', 'run id to backfill')
+    .option('--all', 'backfill every archived run not already recording neuts')
+    .option('--dry-run', 'validate source logs and report counts without writing')
+    .option('--logs <path>', 'original EVE Gamelogs directory (defaults to archive config)')
+    .option('--archive <path>', 'sitbench archive directory')
+    .action(async (runId: string | undefined, options: Omit<BackfillArguments, 'runId'>) => {
+      await (dependencies.executeBackfill ?? executeBackfill)({
+        ...options,
+        ...(runId !== undefined ? { runId } : {}),
+      });
+    });
+
+  program
     .command('edit')
     .description("interactively edit a run's metadata or confirmed window")
     .argument('<run-id>', 'run id to edit')
@@ -114,6 +131,7 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
 export async function runCli(argv: string[], dependencies: ProgramDependencies = {}): Promise<number> {
   let analysisResult: AnalyzeResult | undefined;
   let recalculateResult: RecalculateResult | undefined;
+  let backfillResult: BackfillResult | undefined;
   let editResult: EditResult | undefined;
   let dashboardResult: DashboardResult | undefined;
   let publishResult: PublishResult | undefined;
@@ -130,6 +148,10 @@ export async function runCli(argv: string[], dependencies: ProgramDependencies =
     executeRecalculate: async (arguments_) => {
       recalculateResult = await executeRecalculate(arguments_);
       return recalculateResult;
+    },
+    executeBackfill: async (arguments_) => {
+      backfillResult = await (dependencies.executeBackfill ?? executeBackfill)(arguments_);
+      return backfillResult;
     },
     executeEdit: async (arguments_) => {
       editResult = await executeEdit(arguments_);
@@ -151,6 +173,8 @@ export async function runCli(argv: string[], dependencies: ProgramDependencies =
       analysisResult?.status === 'fatal' ||
       recalculateResult?.status === 'fatal' ||
       recalculateResult?.status === 'partial' ||
+      backfillResult?.status === 'fatal' ||
+      backfillResult?.status === 'partial' ||
       editResult?.status === 'fatal' ||
       dashboardResult?.status === 'fatal' ||
       publishResult?.status === 'fatal';
@@ -211,6 +235,13 @@ async function executeInteractively(arguments_: AnalyzeArguments): Promise<Analy
 async function executeRecalculateInteractively(arguments_: RecalculateArguments): Promise<RecalculateResult> {
   const archiveDir = arguments_.archive ?? defaultArchiveDir();
   return runRecalculate(arguments_, {
+    rebuildCatalog: makeDashboardRebuild(archiveDir),
+  });
+}
+
+async function executeBackfill(arguments_: BackfillArguments): Promise<BackfillResult> {
+  const archiveDir = arguments_.archive ?? defaultArchiveDir();
+  return runBackfill(arguments_, {
     rebuildCatalog: makeDashboardRebuild(archiveDir),
   });
 }

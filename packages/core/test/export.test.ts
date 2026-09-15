@@ -264,6 +264,31 @@ describe('Zod dataset schemas', () => {
 });
 
 describe('buildPublicDashboardDataset', () => {
+  it('omits recorded pressure by default and preserves it only with character opt-in', () => {
+    const run = buildRun({ windowStart: '2026-09-01T10:00:00.000Z' });
+    run.coverage.neutPressure = 'recorded';
+    run.characterMetrics[0]!.neutPressure = {
+      totalGj: 120, averageGjPerSecond: 0.2, peak10sGjPerSecond: 12, eventCount: 1,
+    };
+    run.characterMetrics[1]!.neutPressure = {
+      totalGj: 0, averageGjPerSecond: 0, peak10sGjPerSecond: 0, eventCount: 0,
+    };
+
+    const privateByDefault = buildPublicDashboardDataset([run]);
+    expect(privateByDefault.runs[0]).not.toHaveProperty('characterMetrics');
+    expect(JSON.stringify(privateByDefault)).not.toContain('totalGj');
+    expect(privateByDefault.runs[0]?.coverage.neutPressure).toBe('recorded');
+
+    const shared = buildPublicDashboardDataset([run], { includeCharacters: true });
+    const restored = PublicDashboardDatasetSchema.parse(JSON.parse(JSON.stringify(shared)));
+    expect(restored.runs[0]).toMatchObject({
+      characterMetrics: [
+        { character: 'Alpha', neutPressure: { totalGj: 120, averageGjPerSecond: 0.2, peak10sGjPerSecond: 12, eventCount: 1 } },
+        { character: 'Bravo', neutPressure: { totalGj: 0, averageGjPerSecond: 0, peak10sGjPerSecond: 0, eventCount: 0 } },
+      ],
+    });
+  });
+
   it('defaults to mode "public" with both capabilities false and excludes character/notes fields', () => {
     const run = buildRun({ windowStart: '2026-09-01T10:00:00.000Z' });
     const dataset = buildPublicDashboardDataset([run]);

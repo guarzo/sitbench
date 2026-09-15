@@ -47,6 +47,11 @@ export function formatDamage(damage: number): string {
   return Math.round(damage).toLocaleString('en-US');
 }
 
+/** Retains fractional capacitor drain in GJ or GJ/s without padding whole values. */
+export function formatNeutDrain(value: number): string {
+  return value.toLocaleString('en-US', { maximumFractionDigits: 2 });
+}
+
 /** Formats a fraction (0–1) as a percentage string, e.g. "58.3%". */
 export function formatPercent(fraction: number): string {
   return `${(fraction * 100).toFixed(1)}%`;

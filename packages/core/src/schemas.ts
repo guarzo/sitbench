@@ -59,7 +59,7 @@ const NormalizedEventBase = z
 const TargetClassification = z.enum(['npc', 'non-site', 'ambiguous']);
 
 // ---------------------------------------------------------------------------
-// Five initial normalized-event kinds (discriminated union)
+// Normalized-event kinds (discriminated union)
 // ---------------------------------------------------------------------------
 
 /**
@@ -113,13 +113,22 @@ export const RemoteRepairReceivedSchema = NormalizedEventBase.extend({
   amount: z.number().nonnegative(),
 }).strict();
 
-/** Union of all five supported normalized event kinds. */
+/** Capacitor energy neutralized from the observing character, in GJ. */
+export const NeutReceivedSchema = NormalizedEventBase.extend({
+  kind: z.literal('neut-received'),
+  actor: z.string(),
+  target: z.string(),
+  amount: z.number().nonnegative(),
+}).strict();
+
+/** Union of all supported normalized event kinds. */
 export const NormalizedEventSchema = z.discriminatedUnion('kind', [
   DamageDealtSchema,
   DamageTakenSchema,
   MissSchema,
   RemoteRepairDeliveredSchema,
   RemoteRepairReceivedSchema,
+  NeutReceivedSchema,
 ]);
 
 export type NormalizedEvent = z.infer<typeof NormalizedEventSchema>;
@@ -128,6 +137,7 @@ export type DamageTaken = z.infer<typeof DamageTakenSchema>;
 export type Miss = z.infer<typeof MissSchema>;
 export type RemoteRepairDelivered = z.infer<typeof RemoteRepairDeliveredSchema>;
 export type RemoteRepairReceived = z.infer<typeof RemoteRepairReceivedSchema>;
+export type NeutReceived = z.infer<typeof NeutReceivedSchema>;
 
 // ---------------------------------------------------------------------------
 // Site identity
@@ -219,6 +229,20 @@ export type RunMetrics = z.infer<typeof RunMetricsSchema>;
 // CharacterMetrics – per-character output consumed by Task 3
 // ---------------------------------------------------------------------------
 
+/** Recorded incoming capacitor neutralization pressure for one character. */
+export const NeutPressureMetricsSchema = z
+  .object({
+    totalGj: z.number().nonnegative(),
+    /** GJ / elapsed run seconds. Zero elapsed time → zero. */
+    averageGjPerSecond: z.number().nonnegative(),
+    /** Maximum GJ in (t - 10s, t], divided by a fixed 10 seconds. */
+    peak10sGjPerSecond: z.number().nonnegative(),
+    eventCount: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export type NeutPressureMetrics = z.infer<typeof NeutPressureMetricsSchema>;
+
 export const CharacterMetricsSchema = z
   .object({
     /** Character name, matches the display name from EVE gamelogs. */
@@ -234,6 +258,8 @@ export const CharacterMetricsSchema = z
     damageTaken: z.number().nonnegative(),
     remoteRepairDelivered: z.number().nonnegative(),
     remoteRepairReceived: z.number().nonnegative(),
+    /** Absent when incoming neutralization recording was unavailable. */
+    neutPressure: NeutPressureMetricsSchema.optional(),
     shotsHit: z.number().int().nonnegative(),
     shotsMissed: z.number().int().nonnegative(),
     /** missRate = shotsMissed / (shotsHit + shotsMissed). Zero total → zero. */
@@ -259,6 +285,8 @@ export const CoverageSchema = z
     participantsWithOutgoingDamage: z.number().int().nonnegative(),
     unparsedCombatLines: z.number().int().nonnegative(),
     ambiguousEventsExcluded: z.number().int().nonnegative(),
+    /** Absent for legacy runs whose parser did not record neutralization. */
+    neutPressure: z.literal('recorded').optional(),
     /**
      * Quality of remote-repair pairing:
      *   'none'    – no repair data at all
@@ -297,7 +325,21 @@ export const RunSummarySchema = z
     createdAt: IsoDateTimeString,
     updatedAt: IsoDateTimeString,
   })
-  .strict();
+  .strict()
+  .superRefine((summary, context) => {
+    const recorded = summary.coverage.neutPressure === 'recorded';
+    for (const [index, metric] of summary.characterMetrics.entries()) {
+      if ((metric.neutPressure !== undefined) !== recorded) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['characterMetrics', index, 'neutPressure'],
+          message: recorded
+            ? 'Recorded neut coverage requires neut metrics for every character.'
+            : 'Neut metrics require recorded neut coverage.',
+        });
+      }
+    }
+  });
 
 export type RunSummary = z.infer<typeof RunSummarySchema>;
 

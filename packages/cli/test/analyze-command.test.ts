@@ -113,6 +113,23 @@ class CountingArchive extends Archive {
 }
 
 describe('runAnalyze', () => {
+  it.each([0, 120])('records incoming neut availability, including supported zero (%i GJ)', async (amount) => {
+    await writeCandidateLog();
+    const file = path.join(logsDir, 'combat.txt');
+    if (amount > 0) {
+      await writeFile(file, `${await readFile(file, 'utf8')}\n[ 2026.09.03 04:04:10 ] (combat) <color=0xffe57f7f><b>120 GJ</b><color=0x77ffffff><font size=10> energy neutralized </font><b><color=0xffffffff>Sleepless Keeper</b><color=0x77ffffff><font size=10> - Sleepless Keeper</font>`);
+      await utimes(file, fixedClock(), fixedClock());
+    }
+    expect(await runAnalyze({ logs: logsDir, archive: archiveDir }, {
+      prompts: newestWindowPrompts, clock: fixedClock, write: () => undefined,
+    })).toMatchObject({ status: 'saved' });
+    const [saved] = await new Archive(archiveDir).listRuns();
+    expect(saved?.coverage.neutPressure).toBe('recorded');
+    expect(saved?.characterMetrics[0]?.neutPressure).toEqual({
+      totalGj: amount, averageGjPerSecond: amount / 20, peak10sGjPerSecond: amount / 10, eventCount: amount > 0 ? 1 : 0,
+    });
+  });
+
   it('saves the newest candidate with supplied metadata and reports a matching previous run', async () => {
     await writeCandidateLog();
     await saveMatchingHistoricalRun();
