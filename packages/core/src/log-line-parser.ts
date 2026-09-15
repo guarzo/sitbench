@@ -2,6 +2,7 @@ import {
   DamageDealtSchema,
   DamageTakenSchema,
   MissSchema,
+  NeutReceivedSchema,
   RemoteRepairDeliveredSchema,
   RemoteRepairReceivedSchema,
   type NormalizedEvent,
@@ -24,6 +25,10 @@ const INCOMING_DAMAGE_LINE = new RegExp(
 const EVE_INCOMING_DAMAGE_LINE = new RegExp(
   `^(?<amount>\\d+) from (?<actor>.+?) - (?<weapon>.+?) - (?<hitQuality>${HIT_QUALITY_PATTERN})$`,
 );
+// The prose is also used for outgoing neutralization; only the verified red
+// amount markup establishes that the observing character received it.
+const INCOMING_NEUT_AMOUNT = /^<color=0xffe57f7f><b>\d+(?:\.\d+)? GJ<\/b>/i;
+const INCOMING_NEUT_LINE = /^(?<amount>\d+(?:\.\d+)?) GJ energy neutralized (?<actor>.+?) - .+$/;
 const MISS_LINE = /^Your (?<weapon>.+?) misses (?<target>.+?) completely$/;
 const REMOTE_REPAIR_DELIVERED_LINE =
   /^(?<amount>\d+) remote (?<repairKind>shield boosted|armor repaired) to (?<target>.+?) by (?<actor>.+)$/;
@@ -71,7 +76,8 @@ export function inspectCombatLine(line: string, source: SourceContext): CombatLi
     return { status: 'malformed' };
   }
 
-  const body = requiredGroup(envelope.groups.body).replace(EVE_MARKUP, '').trim();
+  const rawBody = requiredGroup(envelope.groups.body);
+  const body = rawBody.replace(EVE_MARKUP, '').trim();
   const baseEvent = {
     timestamp,
     observedBy: source.observedBy,
@@ -79,6 +85,20 @@ export function inspectCombatLine(line: string, source: SourceContext): CombatLi
     sourceLine: source.sourceLine,
     raw: line,
   };
+
+  const incomingNeut = INCOMING_NEUT_AMOUNT.test(rawBody) ? INCOMING_NEUT_LINE.exec(body) : null;
+  if (incomingNeut?.groups) {
+    return {
+      status: 'parsed',
+      event: NeutReceivedSchema.parse({
+        ...baseEvent,
+        kind: 'neut-received',
+        actor: requiredGroup(incomingNeut.groups.actor).trim(),
+        target: source.observedBy,
+        amount: Number(requiredGroup(incomingNeut.groups.amount)),
+      }),
+    };
+  }
 
   const eveOutgoingDamage = EVE_OUTGOING_DAMAGE_LINE.exec(body);
   if (eveOutgoingDamage?.groups) {

@@ -55,6 +55,13 @@ function minimalRunSummaryFields(id: string) {
 // Existing brief-mandated test (preserved verbatim)
 // ---------------------------------------------------------------------------
 describe('RunSummarySchema', () => {
+  it('round-trips recorded neutralization coverage without changing the summary version', () => {
+    const summary = minimalRunSummaryFields('recorded-neut-run');
+    const recorded = { ...summary, coverage: { ...summary.coverage, neutPressure: 'recorded' } };
+
+    expect(RunSummarySchema.parse(JSON.parse(JSON.stringify(recorded)))).toEqual(recorded);
+  });
+
   it('accepts a minimal valid run summary', () => {
     const parsed = RunSummarySchema.parse({
       schemaVersion: 1,

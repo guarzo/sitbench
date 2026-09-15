@@ -1,12 +1,50 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { fingerprintRun } from '../src/fingerprint.js';
 import { normalizeLogFile } from '../src/normalize.js';
+import { NormalizedEventSchema } from '../src/schemas.js';
 
 function readFixture(name: string): string {
   return readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
 }
 
 describe('normalizeLogFile', () => {
+  it('retains neutralization evidence and duplicate hits in normalization and the run fingerprint', () => {
+    const raw =
+      '[ 2026.09.15 01:09:25 ] (combat) <color=0xffe57f7f><b>120 GJ</b><color=0x77ffffff><font size=10> energy neutralized </font><b><color=0xffffffff>Sleepless Keeper</b><color=0x77ffffff><font size=10> - Sleepless Keeper</font>';
+    const damage = '[ 2026.09.15 01:09:24 ] (combat) 100 to Sleepless Guardian - Heavy Entropic Disintegrator II - Hits';
+    const outgoing = raw.replace('0xffe57f7f', '0xff7fffff');
+    const result = normalizeLogFile({
+      text: ['Listener: Pilot One', raw, damage, raw, outgoing].join('\r\n'),
+      sourceFile: 'neut-session.txt',
+    });
+
+    expect(result.character).toBe('Pilot One');
+    expect(result.counts).toEqual({
+      lines: 5, combatLines: 4, parsedCombatLines: 3, unparsedCombatLines: 1,
+      malformedLines: 0, ambiguousEventsExcluded: 0,
+    });
+    expect(result.events.map(({ kind, sourceLine }) => [kind, sourceLine])).toEqual([
+      ['damage-dealt', 3], ['neut-received', 2], ['neut-received', 4],
+    ]);
+    expect(result.events[1]).toEqual({
+      kind: 'neut-received', timestamp: '2026-09-15T01:09:25.000Z',
+      observedBy: 'Pilot One', actor: 'Sleepless Keeper', target: 'Pilot One', amount: 120,
+      sourceFile: 'neut-session.txt', sourceLine: 2, raw,
+    });
+    expect(result.events[2]?.raw).toBe(raw);
+
+    const restored = result.events.map((event) => NormalizedEventSchema.parse(JSON.parse(JSON.stringify(event))));
+    const window = {
+      start: '2026-09-15T01:09:24.000Z', end: '2026-09-15T01:09:25.000Z',
+      source: 'test-fixture', manuallyAdjusted: false,
+    };
+    const fingerprint = fingerprintRun(result.events, window);
+    expect(fingerprintRun(restored.reverse(), window)).toBe(fingerprint);
+    expect(fingerprintRun(result.events.filter((event) => event.kind === 'damage-dealt'), window)).not.toBe(fingerprint);
+    expect(fingerprintRun(result.events.slice(0, 2), window)).not.toBe(fingerprint);
+  });
+
   it('normalizes a damage session instead of dropping raw lines, deduplicating repeated hits, or hiding unsupported combat coverage gaps', () => {
     const result = normalizeLogFile({
       text: readFixture('damage-session.txt'),

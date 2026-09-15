@@ -321,7 +321,7 @@ describe('recalculate derivative generation', () => {
     expect(outcome?.status === 'recalculated-with-warning' ? outcome.reason : '').toContain('catalog: ');
     // The recalculation itself was durably applied.
     const reloaded = await new Archive(archiveDir).loadRun(summary.id);
-    expect(reloaded?.summary.metricsVersion).toBe('0.1.0');
+    expect(reloaded?.summary.metricsVersion).toBe('0.2.0');
   });
 
   it('exposes both catalog and dashboard reasons when both derivatives fail', async () => {
@@ -377,8 +377,8 @@ describe('recalculate derivative generation', () => {
     // Both runs were durably recalculated despite both derivatives failing twice.
     const reloadedFirst = await new Archive(archiveDir).loadRun(first.id);
     const reloadedSecond = await new Archive(archiveDir).loadRun(second.id);
-    expect(reloadedFirst?.summary.metricsVersion).toBe('0.1.0');
-    expect(reloadedSecond?.summary.metricsVersion).toBe('0.1.0');
+    expect(reloadedFirst?.summary.metricsVersion).toBe('0.2.0');
+    expect(reloadedSecond?.summary.metricsVersion).toBe('0.2.0');
     expect(output.filter((line) => line.includes('follow-up generation failed'))).toHaveLength(2);
   });
 });

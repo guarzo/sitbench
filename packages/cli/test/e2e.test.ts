@@ -73,7 +73,7 @@ describe('Sitbench end-to-end workflow', () => {
     expect(saved).not.toBeNull();
     if (saved === null) throw new Error('Expected the saved run to be loadable from the archive.');
 
-    expect(saved.summary.parserVersion).toBe('0.2.0');
+    expect(saved.summary.parserVersion).toBe('0.3.0');
     expect(saved.summary.metrics.elapsedSeconds).toBe(40);
     expect(saved.summary.metrics.fleetDamageDealt).toBe(1000);
     expect(saved.summary.characterMetrics.map((metric) => [metric.character, metric.damageDealt])).toEqual([

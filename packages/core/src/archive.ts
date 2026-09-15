@@ -603,11 +603,11 @@ export class Archive {
    * (`run.json` and `events.jsonl`); `updateRun` rewrites them via two
    * separate atomic renames (a true multi-file transaction is not possible
    * with plain filesystem renames). Acquiring the archive lock for the
-   * duration of this read prevents observing a "mixed generation" — e.g. the
-   * new `run.json` paired with the old `events.jsonl` mid-update. If the
-   * archive is currently locked by another operation, this fails clearly
-   * with `ArchiveLockedError` rather than silently risking a mixed read; no
-   * retry loop is implemented.
+   * duration of this read prevents observing an in-progress update between
+   * the evidence and summary writes. A failed summary write can still leave
+   * newer evidence alongside the old summary (see `updateRun`). If the archive
+   * is currently locked by another operation, this fails clearly with
+   * `ArchiveLockedError`; no retry loop is implemented.
    */
   async loadRun(id: string): Promise<{ summary: RunSummary; events: NormalizedEvent[] } | null> {
     const release = await acquireLock(this.archiveDir);
@@ -663,8 +663,11 @@ export class Archive {
    * the current time regardless of what `updater` returns. Each file is
    * rewritten via temp-file-then-rename inside the existing run directory
    * (the directory itself already exists, so it cannot be replaced with a
-   * single atomic rename the way a new run can). Rebuilds `catalog.json` on
-   * success, following the same reporting behavior as `saveRun`.
+   * single atomic rename the way a new run can). Events are persisted before
+   * the summary so recorded coverage never commits ahead of its evidence.
+   * An evidence-write failure leaves the old summary intact; a subsequent
+   * summary-write failure retains the newer evidence for a retry. Rebuilds
+   * `catalog.json` on success, following the same reporting behavior as `saveRun`.
    */
   async updateRun(
     id: string,
@@ -708,8 +711,8 @@ export class Archive {
         );
       }
 
-      await writeFileAtomic(path.join(dir, 'run.json'), `${JSON.stringify(finalSummary, null, 2)}\n`);
       await writeFileAtomic(path.join(dir, 'events.jsonl'), serializeEvents(finalEvents));
+      await writeFileAtomic(path.join(dir, 'run.json'), `${JSON.stringify(finalSummary, null, 2)}\n`);
 
       await this.rebuildCatalogLocked('update');
 

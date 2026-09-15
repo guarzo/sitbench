@@ -1,5 +1,5 @@
 import type { DashboardCapabilities, DashboardRun } from './data.js';
-import { formatDamage, formatDps, formatElapsed, formatPercent, formatRepairPairing, formatShortDate } from './format.js';
+import { formatDamage, formatDps, formatElapsed, formatNeutDrain, formatPercent, formatRepairPairing, formatShortDate } from './format.js';
 
 // ---------------------------------------------------------------------------
 // Selected-run detail panel
@@ -132,6 +132,54 @@ export function renderDetail(
     scrollWrapper.appendChild(table);
     charSection.appendChild(scrollWrapper);
     container.appendChild(charSection);
+
+    const neutSection = el('div', 'detail-characters');
+    neutSection.appendChild(el('h4', 'detail-characters-heading', 'Observed neut drain'));
+    const neutDescription = el('p', 'detail-notes-text',
+      'Logged incoming capacitor drain, not theoretical pressure. Average: full run. Peak: highest 10s drain total divided by 10, even for shorter runs. Unavailable: recorded neut evidence missing; backfill from original logs.');
+    neutDescription.id = 'neut-drain-description';
+    neutSection.appendChild(neutDescription);
+
+    const neutScroll = el('div', 'detail-char-scroll');
+    neutScroll.setAttribute('tabindex', '0');
+    neutScroll.setAttribute('role', 'group');
+    neutScroll.setAttribute('aria-label', 'Scrollable observed neut drain table');
+
+    const neutTable = document.createElement('table');
+    neutTable.className = 'detail-char-table';
+    neutTable.setAttribute('aria-label', 'Observed neut drain');
+    neutTable.setAttribute('aria-describedby', neutDescription.id);
+
+    const neutHead = document.createElement('thead');
+    const neutHeaderRow = document.createElement('tr');
+    for (const heading of ['Character', 'Total GJ', 'Avg GJ/s', 'Peak 10s GJ/s', 'Events']) {
+      const th = document.createElement('th');
+      th.setAttribute('scope', 'col');
+      th.textContent = heading;
+      neutHeaderRow.appendChild(th);
+    }
+    neutHead.appendChild(neutHeaderRow);
+    neutTable.appendChild(neutHead);
+
+    const neutBody = document.createElement('tbody');
+    for (const cm of run.characterMetrics) {
+      const tr = document.createElement('tr');
+      const pressure = cm.neutPressure;
+      const cells = pressure === undefined
+        ? [cm.character, 'Unavailable', 'Unavailable', 'Unavailable', 'Unavailable']
+        : [cm.character, formatNeutDrain(pressure.totalGj), formatNeutDrain(pressure.averageGjPerSecond),
+            formatNeutDrain(pressure.peak10sGjPerSecond), String(pressure.eventCount)];
+      for (const text of cells) {
+        const td = document.createElement('td');
+        td.textContent = text;
+        tr.appendChild(td);
+      }
+      neutBody.appendChild(tr);
+    }
+    neutTable.appendChild(neutBody);
+    neutScroll.appendChild(neutTable);
+    neutSection.appendChild(neutScroll);
+    container.appendChild(neutSection);
   }
 
   // Notes — only when capability is true

@@ -87,6 +87,71 @@ describe('parseCombatLine', () => {
     });
   });
 
+  it('attributes verified red incoming neutralization to the observer and preserves the raw evidence', () => {
+    const raw =
+      '[ 2026.09.15 01:09:25 ] (combat) <color=0xffe57f7f><b>120 GJ</b><color=0x77ffffff><font size=10> energy neutralized </font><b><color=0xffffffff>Sleepless Keeper</b><color=0x77ffffff><font size=10> - Sleepless Keeper</font>';
+
+    expect(parseCombatLine(raw, {
+      observedBy: 'Pilot One',
+      sourceFile: 'neut-session.txt',
+      sourceLine: 5,
+    })).toEqual({
+      timestamp: '2026-09-15T01:09:25.000Z',
+      kind: 'neut-received',
+      actor: 'Sleepless Keeper',
+      target: 'Pilot One',
+      amount: 120,
+      observedBy: 'Pilot One',
+      sourceFile: 'neut-session.txt',
+      sourceLine: 5,
+      raw,
+    });
+  });
+
+  it('preserves decimal GJ and the actor rather than the trailing Drifter ship type', () => {
+    const raw =
+      '[ 2026.09.15 01:09:25 ] (combat) <color=0xffe57f7f><b>120.5 GJ</b><color=0x77ffffff><font size=10> energy neutralized </font><b><color=0xffffffff>Hyleus Tyrannos</b><color=0x77ffffff><font size=10> - Drifter Recon Battleship</font>';
+
+    expect(parseCombatLine(raw, {
+      observedBy: 'Pilot Two',
+      sourceFile: 'neut-session.txt',
+      sourceLine: 6,
+    })).toMatchObject({
+      kind: 'neut-received',
+      actor: 'Hyleus Tyrannos',
+      target: 'Pilot Two',
+      observedBy: 'Pilot Two',
+      amount: 120.5,
+      raw,
+    });
+  });
+
+  it.each([
+    ['opposite amount color', '<color=0xff7fffff><b>120 GJ</b>'],
+    ['unknown amount color', '<color=0xffffffff><b>120 GJ</b>'],
+    ['no amount color', '<b>120 GJ</b>'],
+    ['no markup', '120 GJ'],
+  ])('does not infer incoming neutralization from identical prose with %s', (_direction, amount) => {
+    const raw = `[ 2026.09.15 01:09:25 ] (combat) ${amount} energy neutralized Sleepless Keeper - Sleepless Keeper`;
+
+    expect(parseCombatLine(raw, {
+      observedBy: 'Pilot One',
+      sourceFile: 'neut-session.txt',
+      sourceLine: 7,
+    })).toBeNull();
+  });
+
+  it('does not treat red source-name markup as evidence of an incoming amount', () => {
+    const raw =
+      '[ 2026.09.15 01:09:25 ] (combat) <color=0xffffffff><b>120 GJ</b><color=0x77ffffff><font size=10> energy neutralized </font><b><color=0xffe57f7f>Sleepless Keeper</b><color=0x77ffffff><font size=10> - Sleepless Keeper</font>';
+
+    expect(parseCombatLine(raw, {
+      observedBy: 'Pilot One',
+      sourceFile: 'neut-session.txt',
+      sourceLine: 8,
+    })).toBeNull();
+  });
+
   it('parses incoming damage lines into damage-taken events instead of misattributing the target away from the observer', () => {
     const raw = damageLines[5];
     const event = parseCombatLine(raw, {

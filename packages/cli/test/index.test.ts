@@ -67,6 +67,21 @@ describe('isDirectEntryPoint', () => {
 });
 
 describe('runCli', () => {
+  it('accepts explicit neut backfill options and returns nonzero for a partial batch', async () => {
+    let received: unknown;
+    const code = await runCli(['backfill-neuts', '--all', '--dry-run', '--logs', '/logs', '--archive', '/archive'], {
+      executeBackfill: async (arguments_) => {
+        received = arguments_;
+        return { status: 'ok', outcomes: [] };
+      },
+    });
+    expect(code).toBe(0);
+    expect(received).toEqual({ all: true, dryRun: true, logs: '/logs', archive: '/archive' });
+    expect(await runCli(['backfill-neuts', 'run-1'], {
+      executeBackfill: async () => ({ status: 'partial', outcomes: [{ id: 'run-1', status: 'not-found' }] }),
+    })).toBe(1);
+  });
+
   it('returns a nonzero exit code when injected analyze execution reports a fatal result', async () => {
     await expect(
       runCli(['analyze'], { execute: async () => ({ status: 'fatal', reason: 'logs' }) }),

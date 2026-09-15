@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { calculateRun } from '../src/metrics.js';
-import type { NormalizedEvent, RunWindow } from '../src/schemas.js';
+import type { NeutReceived, NormalizedEvent, RunWindow } from '../src/schemas.js';
 
 const BASE_MS = Date.parse('2026-01-01T00:00:00.000Z');
 
@@ -107,6 +107,106 @@ function repairReceived(character: string, actor: string, seconds: number, amoun
     amount,
   };
 }
+
+function neutReceived(character: string, seconds: number, amount: number): NeutReceived {
+  lineCounter += 1;
+  return {
+    kind: 'neut-received',
+    timestamp: atSeconds(seconds),
+    observedBy: character,
+    sourceFile: 'metrics.txt',
+    sourceLine: lineCounter,
+    raw: `raw-${lineCounter}`,
+    actor: 'Sleepless Keeper',
+    target: character,
+    amount,
+  };
+}
+
+describe('calculateRun neut pressure', () => {
+  it('uses a half-open rolling 10-second peak while preserving simultaneous hits in unsorted input', () => {
+    // At 9.999s: 120 + 120 + 60 = 300 GJ. At 10s the two 0s hits
+    // expire, leaving 160 GJ; at 20s the 10s hit expires, leaving 200 GJ.
+    const events = [
+      neutReceived('Pilot One', 20, 200),
+      neutReceived('Pilot One', 0, 120),
+      neutReceived('Pilot One', 10, 100),
+      neutReceived('Pilot One', 9.999, 60),
+      neutReceived('Pilot One', 0, 120),
+    ];
+    const result = calculateRun(events, window(0, 20), undefined, { neutPressureAvailable: true });
+
+    expect(result.characterMetrics[0]?.neutPressure).toEqual({
+      totalGj: 600,
+      averageGjPerSecond: 30,
+      peak10sGjPerSecond: 30,
+      eventCount: 5,
+    });
+    expect(events.map((event) => event.amount)).toEqual([200, 120, 100, 60, 120]);
+  });
+
+  it('clips inclusively and separates observers, supported zeros, and damage metrics in a short run', () => {
+    // Elapsed = 5s. Alpha: 12.5 + 12.5 + 25 = 50 GJ; Bravo: 100 + 200 = 300 GJ.
+    // Both peaks still divide by 10s, not elapsed time. Charlie receives no neuts.
+    const events = [
+      neutReceived('Bravo', 105, 200),
+      neutReceived('Alpha', 99, 9000),
+      neutReceived('Alpha', 100, 12.5),
+      neutReceived('Bravo', 100, 100),
+      neutReceived('Alpha', 100, 12.5),
+      neutReceived('Alpha', 105, 25),
+      neutReceived('Bravo', 106, 9000),
+      neutReceived('Outside', 99, 9000),
+      damageDealt('Charlie', 101, 50),
+      damageDealt('Charlie', 104, 100),
+      damageTaken('Alpha', 102, 400),
+      repairDelivered('Bravo', 'Alpha', 103, 200),
+      repairReceived('Alpha', 'Bravo', 103, 200),
+    ];
+    const result = calculateRun(events, window(100, 105), undefined, { neutPressureAvailable: true });
+
+    expect(result.characterMetrics.map(({ character, neutPressure }) => ({ character, neutPressure }))).toEqual([
+      { character: 'Alpha', neutPressure: { totalGj: 50, averageGjPerSecond: 10, peak10sGjPerSecond: 5, eventCount: 3 } },
+      { character: 'Bravo', neutPressure: { totalGj: 300, averageGjPerSecond: 60, peak10sGjPerSecond: 30, eventCount: 2 } },
+      { character: 'Charlie', neutPressure: { totalGj: 0, averageGjPerSecond: 0, peak10sGjPerSecond: 0, eventCount: 0 } },
+    ]);
+    expect(result.metrics).toEqual({
+      elapsedSeconds: 5,
+      activeCombatSeconds: 3,
+      idleSeconds: 2,
+      fleetDamageDealt: 150,
+      averageFleetDps: 30,
+      activeFleetDps: 50,
+      damageTaken: 400,
+      remoteRepairDelivered: 200,
+      participantCount: 3,
+    });
+    expect(result.characterMetrics[0]).toMatchObject({
+      damageTaken: 400, remoteRepairReceived: 200, shotsHit: 0,
+      firstRelevantEvent: null, lastRelevantEvent: null,
+    });
+    expect(result.characterMetrics[2]).toMatchObject({
+      damageDealt: 150, shotsHit: 2, firstRelevantEvent: atSeconds(101), lastRelevantEvent: atSeconds(104),
+    });
+  });
+
+  it.each([undefined, { neutPressureAvailable: false }])('keeps pressure absent without recording support: %j', (options) => {
+    const result = calculateRun([neutReceived('Alpha', 5, 120)], window(0, 20), undefined, options);
+
+    expect(result.characterMetrics).toHaveLength(1);
+    expect(result.characterMetrics[0]).not.toHaveProperty('neutPressure');
+  });
+
+  it('keeps total and peak pressure but returns a zero average for a zero-elapsed window', () => {
+    const result = calculateRun([neutReceived('Alpha', 5, 120)], window(5, 5), undefined, {
+      neutPressureAvailable: true,
+    });
+
+    expect(result.characterMetrics[0]?.neutPressure).toEqual({
+      totalGj: 120, averageGjPerSecond: 0, peak10sGjPerSecond: 12, eventCount: 1,
+    });
+  });
+});
 
 describe('calculateRun', () => {
   it('computes elapsed time, fleet damage, average DPS, and per-character damage share (hand-derived)', () => {
